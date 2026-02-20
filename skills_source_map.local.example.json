@@ -4,9 +4,9 @@
     "path": ".",
     "ref": "main"
   },
-  "skill-updater": {
-    "repo": "owner/private-skill-updater",
-    "path": "skill-updater",
+  "codex-skill-updater": {
+    "repo": "owner/private-codex-skill-updater",
+    "path": "codex-skill-updater",
     "ref": "main"
   }
 }

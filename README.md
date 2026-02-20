@@ -1,4 +1,4 @@
-# skill-updater
+# codex-skill-updater
 
 `~/.codex/skills` に入っているユーザースキルを更新する **Codex用スキル** です。  
 混在ソース（GitHub / private repo / local archive / source_map）に対応しています。  
@@ -29,9 +29,9 @@ Codexに次のように指示します。
 
 ## 主なファイル
 
-- `skill-updater/SKILL.md`: Codexが読むスキル定義
-- `skill-updater/scripts/update_skills.py`: 入口（check + apply）
-- `skill-updater/scripts/check_skill_updates.py`: 事前チェック
-- `skill-updater/scripts/apply_skill_updates.py`: 実更新
+- `codex-skill-updater/SKILL.md`: Codexが読むスキル定義
+- `codex-skill-updater/scripts/update_skills.py`: 入口（check + apply）
+- `codex-skill-updater/scripts/check_skill_updates.py`: 事前チェック
+- `codex-skill-updater/scripts/apply_skill_updates.py`: 実更新
 - `skills_source_map.json`: 公開マップ
 - `skills_source_map.local.example.json`: ローカルマップ例
