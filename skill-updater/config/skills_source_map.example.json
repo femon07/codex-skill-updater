@@ -1,0 +1,12 @@
+{
+  "codex-official-agent-impl": {
+    "repo": "owner/repo",
+    "path": "skills/codex-official-agent-impl",
+    "ref": "main"
+  },
+  "web-design-guidelines": {
+    "repo": "owner/repo",
+    "path": "skills/web-design-guidelines",
+    "ref": "main"
+  }
+}
