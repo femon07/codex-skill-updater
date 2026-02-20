@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -112,6 +113,35 @@ def _copy_tree(src: Path, dst: Path) -> None:
         else:
             shutil.rmtree(dst)
     shutil.copytree(src, dst)
+
+
+def _fingerprint_tree(root: Path) -> str:
+    if not root.is_dir():
+        raise RuntimeError(f"not a directory: {root}")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            digest.update(b"L")
+            digest.update(rel)
+            digest.update(b"\0")
+            digest.update(os.readlink(path).encode("utf-8", errors="replace"))
+            digest.update(b"\0")
+            continue
+        if path.is_dir():
+            digest.update(b"D")
+            digest.update(rel)
+            digest.update(b"\0")
+            continue
+        if path.is_file():
+            digest.update(b"F")
+            digest.update(rel)
+            digest.update(b"\0")
+            with path.open("rb") as fp:
+                for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _read_archive_path_from_note(note: str) -> Path | None:
@@ -358,6 +388,19 @@ def main(argv: list[str]) -> int:
                         strategy=row.strategy,
                         status="SKIPPED",
                         reason="unsupported_strategy",
+                    )
+                )
+                continue
+
+            dest = _target_root(row.bucket) / row.skill
+            if dest.is_dir() and _fingerprint_tree(staged) == _fingerprint_tree(dest):
+                results.append(
+                    UpdateResult(
+                        skill=row.skill,
+                        strategy=row.strategy,
+                        status="SKIPPED",
+                        reason="no_changes_detected",
+                        commands=commands,
                     )
                 )
                 continue

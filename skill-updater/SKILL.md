@@ -64,6 +64,7 @@ Use this format:
 
 - Default behavior creates backups under `backups/<timestamp>/`.
 - On failure, rollback is attempted automatically.
+- If staged content is identical to installed content, update is skipped (`no_changes_detected`).
 - Use `--fail-fast` to stop on first failure.
 - Use `--strategy` and `--skill` to run partial updates safely.
 
