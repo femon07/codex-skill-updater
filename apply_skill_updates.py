@@ -262,7 +262,7 @@ def _filter_rows(rows: list[UpdateRow], strategies: set[str], skills: set[str]) 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply Codex skill updates from TSV.")
-    parser.add_argument("--check-file", default="skill_update_check.tsv")
+    parser.add_argument("--check-file", default="-")
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
@@ -271,23 +271,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
     parser.add_argument("--fail-fast", action="store_true")
-    parser.add_argument("--report", default="skill_update_apply_report.json")
+    parser.add_argument("--report", default="")
+    parser.add_argument("--debug-artifacts", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
-    check_file = Path(args.check_file).resolve()
-    if not check_file.is_file():
-        print(f"Error: check file not found: {check_file}", file=sys.stderr)
-        return 2
+    if args.debug_artifacts and not args.report:
+        args.report = "skill_update_apply_report.debug.json"
+    check_file: Path | None = None
+    if args.check_file != "-":
+        check_file = Path(args.check_file).resolve()
+        if not check_file.is_file():
+            print(f"Error: check file not found: {check_file}", file=sys.stderr)
+            return 2
     if not INSTALLER_SCRIPT.is_file():
         print(f"Error: installer script not found: {INSTALLER_SCRIPT}", file=sys.stderr)
         return 2
 
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_root = Path(args.backup_root).resolve() if args.backup_root else (Path.cwd() / "backups" / ts)
-    report_path = Path(args.report).resolve()
+    report_path = Path(args.report).resolve() if args.report else None
     strategies = {s.strip() for s in args.strategy if s.strip()}
     skills = {s.strip() for s in args.skill if s.strip()}
 
@@ -297,7 +302,17 @@ def main(argv: list[str]) -> int:
         source_map_path = Path(args.source_map).resolve() if args.source_map else _default_source_map_path().resolve()
         source_map = _load_source_map(source_map_path)
 
-    rows = _load_rows(check_file)
+    if args.check_file == "-":
+        fd, tmp_name = tempfile.mkstemp(prefix="skill-check-", suffix=".tsv")
+        os.close(fd)
+        tmp_check = Path(tmp_name)
+        try:
+            tmp_check.write_text(sys.stdin.read(), encoding="utf-8")
+            rows = _load_rows(tmp_check)
+        finally:
+            tmp_check.unlink(missing_ok=True)
+    else:
+        rows = _load_rows(check_file)
     selected = _filter_rows(rows, strategies, skills)
     results: list[UpdateResult] = []
 
@@ -464,19 +479,21 @@ def main(argv: list[str]) -> int:
     report: dict[str, Any] = {
         "generated_at": dt.datetime.now().isoformat(),
         "dry_run": args.dry_run,
-        "check_file": str(check_file),
+        "check_file": str(check_file) if check_file else "-",
         "backup_root": str(backup_root),
         "source_map_used": args.allow_manual_map,
         "source_map_path": str(source_map_path) if source_map_path else None,
         "summary": summary,
         "results": [r.__dict__ for r in results],
     }
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with report_path.open("w", encoding="utf-8") as fp:
-        json.dump(report, fp, ensure_ascii=False, indent=2)
+    if report_path:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as fp:
+            json.dump(report, fp, ensure_ascii=False, indent=2)
 
     print(json.dumps(summary, ensure_ascii=False))
-    print(f"report: {report_path}")
+    if report_path:
+        print(f"report: {report_path}")
     return 1 if summary["failed"] > 0 else 0
 
 
