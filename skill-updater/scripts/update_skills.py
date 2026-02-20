@@ -34,6 +34,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--debug-artifacts", action="store_true")
+    parser.add_argument("--jobs", type=int, default=4)
     return parser.parse_args(argv)
 
 
@@ -47,7 +48,7 @@ def main(argv: list[str]) -> int:
             env["GH_TOKEN"] = gh_token.stdout.strip()
 
     check_proc = subprocess.run(
-        ["python3", str(CHECK_SCRIPT)],
+        ["python3", str(CHECK_SCRIPT), "--jobs", str(args.jobs)],
         text=True,
         capture_output=True,
         check=False,
@@ -64,7 +65,7 @@ def main(argv: list[str]) -> int:
     if args.debug_artifacts:
         Path(DEBUG_CHECK_FILE).write_text(check_output, encoding="utf-8")
 
-    apply_cmd = ["python3", str(APPLY_SCRIPT), "--check-file", "-"]
+    apply_cmd = ["python3", str(APPLY_SCRIPT), "--check-file", "-", "--jobs", str(args.jobs)]
     if args.dry_run:
         apply_cmd.append("--dry-run")
     if args.allow_manual_map:

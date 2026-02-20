@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,8 @@ INSTALLER_DIR = SKILLS_ROOT / ".system" / "skill-installer" / "scripts"
 LIST_SCRIPT = INSTALLER_DIR / "list-skills.py"
 INSTALL_SCRIPT = INSTALLER_DIR / "install-skill-from-github.py"
 DEFAULT_REF = "main"
+DEFAULT_JOBS = 4
+MAX_JOBS = 8
 
 
 @dataclass
@@ -189,11 +192,98 @@ def _strategy_for_skip(
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Preflight-check whether installed Codex skills can be updated safely.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help=f"Parallel probe workers ({1}-{MAX_JOBS}, default: {DEFAULT_JOBS})",
+    )
     return parser.parse_args(argv)
 
 
+def _normalize_jobs(raw_jobs: int) -> int:
+    return max(1, min(MAX_JOBS, raw_jobs))
+
+
+def _evaluate_skill(
+    item: tuple[str, Path, str, dict],
+    openai_curated: set[str],
+    openai_system: set[str],
+    anthropics_skills: set[str],
+) -> SkillEntry:
+    name, local_path, source_bucket, meta = item
+    candidates = _resolve_candidates(
+        name=name,
+        source_bucket=source_bucket,
+        meta=meta,
+        openai_curated=openai_curated,
+        openai_system=openai_system,
+        anthropics_skills=anthropics_skills,
+    )
+    if not candidates:
+        strategy, strategy_note = _strategy_for_skip(
+            name,
+            local_path,
+            meta,
+        )
+        return SkillEntry(
+            name=name,
+            local_path=local_path,
+            source_bucket=source_bucket,
+            remote_repo=None,
+            remote_path=None,
+            check="SKIP",
+            strategy=strategy,
+            note=strategy_note,
+        )
+
+    if local_path.is_symlink():
+        strategy, strategy_note = _strategy_for_skip(
+            name,
+            local_path,
+            meta,
+        )
+        return SkillEntry(
+            name=name,
+            local_path=local_path,
+            source_bucket=source_bucket,
+            remote_repo=None,
+            remote_path=None,
+            check="SKIP",
+            strategy=strategy,
+            note=strategy_note,
+        )
+
+    ok = False
+    repo = None
+    remote_path = None
+    note = "install probe failed"
+    for candidate_repo, candidate_path, reason in candidates:
+        cand_ok, cand_note = _probe_install(candidate_repo, candidate_path)
+        if cand_ok:
+            ok = True
+            repo = candidate_repo
+            remote_path = candidate_path
+            note = f"ok ({reason})"
+            break
+        repo = candidate_repo
+        remote_path = candidate_path
+        note = f"{cand_note} ({reason})"
+    return SkillEntry(
+        name=name,
+        local_path=local_path,
+        source_bucket=source_bucket,
+        remote_repo=repo,
+        remote_path=remote_path,
+        check="OK" if ok else "FAIL",
+        strategy="update-via-github",
+        note=note,
+    )
+
+
 def main(argv: list[str]) -> int:
-    _parse_args(argv)
+    args = _parse_args(argv)
+    jobs = _normalize_jobs(args.jobs)
 
     if not LIST_SCRIPT.is_file() or not INSTALL_SCRIPT.is_file():
         print("skill-installer scripts were not found in ~/.codex/skills/.system", file=sys.stderr)
@@ -203,83 +293,21 @@ def main(argv: list[str]) -> int:
     openai_system = _load_remote_set("openai/skills", "skills/.system")
     anthropics_skills = _load_remote_set("anthropics/skills", "skills")
 
-    rows: list[SkillEntry] = []
-    for name, local_path, source_bucket, meta in _collect_local_skills():
-        candidates = _resolve_candidates(
-            name=name,
-            source_bucket=source_bucket,
-            meta=meta,
-            openai_curated=openai_curated,
-            openai_system=openai_system,
-            anthropics_skills=anthropics_skills,
-        )
-        if not candidates:
-            strategy, strategy_note = _strategy_for_skip(
-                name,
-                local_path,
-                meta,
-            )
-            rows.append(
-                SkillEntry(
-                    name=name,
-                    local_path=local_path,
-                    source_bucket=source_bucket,
-                    remote_repo=None,
-                    remote_path=None,
-                    check="SKIP",
-                    strategy=strategy,
-                    note=strategy_note,
+    local_skills = _collect_local_skills()
+    if jobs == 1:
+        rows = [
+            _evaluate_skill(item, openai_curated, openai_system, anthropics_skills)
+            for item in local_skills
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            rows = list(
+                executor.map(
+                    lambda item: _evaluate_skill(item, openai_curated, openai_system, anthropics_skills),
+                    local_skills,
                 )
             )
-            continue
-
-        if local_path.is_symlink():
-            strategy, strategy_note = _strategy_for_skip(
-                name,
-                local_path,
-                meta,
-            )
-            rows.append(
-                SkillEntry(
-                    name=name,
-                    local_path=local_path,
-                    source_bucket=source_bucket,
-                    remote_repo=None,
-                    remote_path=None,
-                    check="SKIP",
-                    strategy=strategy,
-                    note=strategy_note,
-                )
-            )
-            continue
-
-        ok = False
-        repo = None
-        remote_path = None
-        note = "install probe failed"
-        for candidate_repo, candidate_path, reason in candidates:
-            cand_ok, cand_note = _probe_install(candidate_repo, candidate_path)
-            if cand_ok:
-                ok = True
-                repo = candidate_repo
-                remote_path = candidate_path
-                note = f"ok ({reason})"
-                break
-            repo = candidate_repo
-            remote_path = candidate_path
-            note = f"{cand_note} ({reason})"
-        rows.append(
-            SkillEntry(
-                name=name,
-                local_path=local_path,
-                source_bucket=source_bucket,
-                remote_repo=repo,
-                remote_path=remote_path,
-                check="OK" if ok else "FAIL",
-                strategy="update-via-github",
-                note=note,
-            )
-        )
+    rows = sorted(rows, key=lambda r: r.name)
 
     print("skill\tbucket\tresult\tstrategy\trepo\tremote_path\tnote")
     for row in rows:

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 SKILLS_ROOT = CODEX_HOME / "skills"
 DIST_ROOT = SKILLS_ROOT / "dist"
 INSTALLER_SCRIPT = SKILLS_ROOT / ".system" / "skill-installer" / "scripts" / "install-skill-from-github.py"
+DEFAULT_JOBS = 4
+MAX_JOBS = 8
 
 
 def _default_source_map_path() -> Path:
@@ -53,6 +56,16 @@ class UpdateResult:
     commands: list[str] = field(default_factory=list)
     backup_path: str | None = None
     rollback: str | None = None
+
+
+@dataclass
+class StageTaskResult:
+    index: int
+    row: UpdateRow
+    commands: list[str]
+    result: UpdateResult | None = None
+    temp_root: Path | None = None
+    staged: Path | None = None
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -273,7 +286,158 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--report", default="")
     parser.add_argument("--debug-artifacts", action="store_true")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help=f"Parallel stage workers ({1}-{MAX_JOBS}, default: {DEFAULT_JOBS})",
+    )
     return parser.parse_args(argv)
+
+
+def _normalize_jobs(raw_jobs: int, fail_fast: bool) -> int:
+    if fail_fast:
+        return 1
+    return max(1, min(MAX_JOBS, raw_jobs))
+
+
+def _stage_one(
+    index: int,
+    row: UpdateRow,
+    allow_manual_map: bool,
+    source_map: dict[str, dict[str, str]],
+    dry_run: bool,
+) -> StageTaskResult:
+    commands: list[str] = []
+    temp_root: Path | None = None
+    staged: Path | None = None
+    try:
+        if row.strategy == "update-via-github":
+            if row.repo in {"", "-"} or row.remote_path in {"", "-"}:
+                raise RuntimeError("missing repo/remote_path in check file")
+            temp_root, staged = _stage_from_installer(
+                skill=row.skill,
+                repo=row.repo,
+                skill_path=row.remote_path,
+                ref="main",
+                commands=commands,
+            )
+        elif row.strategy == "sync-from-claude-mirror":
+            return StageTaskResult(
+                index=index,
+                row=row,
+                commands=commands,
+                result=UpdateResult(
+                    skill=row.skill,
+                    strategy=row.strategy,
+                    status="SKIPPED",
+                    reason="claude_mirror_disabled_per_policy",
+                ),
+            )
+        elif row.strategy == "install-from-local-archive":
+            temp_root, staged = _stage_from_archive(row.skill, row.note)
+        elif row.strategy in {"manual-source-map-required", "manual-system-source-map"}:
+            if not allow_manual_map:
+                return StageTaskResult(
+                    index=index,
+                    row=row,
+                    commands=commands,
+                    result=UpdateResult(
+                        skill=row.skill,
+                        strategy=row.strategy,
+                        status="SKIPPED",
+                        reason="manual_source_map_not_enabled",
+                    ),
+                )
+            cfg = source_map.get(row.skill)
+            if not cfg:
+                return StageTaskResult(
+                    index=index,
+                    row=row,
+                    commands=commands,
+                    result=UpdateResult(
+                        skill=row.skill,
+                        strategy=row.strategy,
+                        status="SKIPPED",
+                        reason="skill_not_found_in_source_map",
+                    ),
+                )
+            temp_root, staged = _stage_from_installer(
+                skill=row.skill,
+                repo=cfg["repo"],
+                skill_path=cfg["path"],
+                ref=cfg.get("ref", "main"),
+                commands=commands,
+            )
+        else:
+            return StageTaskResult(
+                index=index,
+                row=row,
+                commands=commands,
+                result=UpdateResult(
+                    skill=row.skill,
+                    strategy=row.strategy,
+                    status="SKIPPED",
+                    reason="unsupported_strategy",
+                ),
+            )
+
+        dest = _target_root(row.bucket) / row.skill
+        if dest.is_dir() and _fingerprint_tree(staged) == _fingerprint_tree(dest):
+            if temp_root and temp_root.exists():
+                shutil.rmtree(temp_root, ignore_errors=True)
+            return StageTaskResult(
+                index=index,
+                row=row,
+                commands=commands,
+                result=UpdateResult(
+                    skill=row.skill,
+                    strategy=row.strategy,
+                    status="SKIPPED",
+                    reason="no_changes_detected",
+                    commands=commands,
+                ),
+            )
+
+        if dry_run:
+            if temp_root and temp_root.exists():
+                shutil.rmtree(temp_root, ignore_errors=True)
+            return StageTaskResult(
+                index=index,
+                row=row,
+                commands=commands,
+                result=UpdateResult(
+                    skill=row.skill,
+                    strategy=row.strategy,
+                    status="DRY_RUN",
+                    reason="staged_and_validated",
+                    commands=commands,
+                ),
+            )
+
+        return StageTaskResult(
+            index=index,
+            row=row,
+            commands=commands,
+            temp_root=temp_root,
+            staged=staged,
+        )
+    except Exception as exc:
+        if temp_root and temp_root.exists():
+            shutil.rmtree(temp_root, ignore_errors=True)
+        return StageTaskResult(
+            index=index,
+            row=row,
+            commands=commands,
+            result=UpdateResult(
+                skill=row.skill,
+                strategy=row.strategy,
+                status="FAILED",
+                reason=str(exc),
+                commands=commands,
+                rollback="not_needed",
+            ),
+        )
 
 
 def main(argv: list[str]) -> int:
@@ -314,159 +478,89 @@ def main(argv: list[str]) -> int:
     else:
         rows = _load_rows(check_file)
     selected = _filter_rows(rows, strategies, skills)
-    results: list[UpdateResult] = []
+    jobs = _normalize_jobs(args.jobs, args.fail_fast)
+    ordered_results: dict[int, UpdateResult] = {}
+    staged_for_apply: list[StageTaskResult] = []
 
-    for row in selected:
-        commands: list[str] = []
-        temp_root: Path | None = None
-        staged: Path | None = None
+    stage_inputs: list[tuple[int, UpdateRow]] = []
+    for idx, row in enumerate(selected):
+        if row.result == "FAIL":
+            ordered_results[idx] = UpdateResult(
+                skill=row.skill,
+                strategy=row.strategy,
+                status="SKIPPED",
+                reason="precheck_result_is_fail",
+            )
+            continue
+        if row.bucket == "system":
+            ordered_results[idx] = UpdateResult(
+                skill=row.skill,
+                strategy=row.strategy,
+                status="SKIPPED",
+                reason="system_updates_disabled_per_policy",
+            )
+            continue
+        stage_inputs.append((idx, row))
+
+    if jobs == 1:
+        stage_outputs = []
+        for idx, row in stage_inputs:
+            out = _stage_one(idx, row, args.allow_manual_map, source_map, args.dry_run)
+            stage_outputs.append(out)
+            if args.fail_fast and out.result is not None and out.result.status in {"FAILED", "FAILED_ROLLBACK"}:
+                break
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            stage_outputs = list(
+                executor.map(
+                    lambda x: _stage_one(x[0], x[1], args.allow_manual_map, source_map, args.dry_run),
+                    stage_inputs,
+                )
+            )
+
+    for out in stage_outputs:
+        if out.result is not None:
+            ordered_results[out.index] = out.result
+            if args.fail_fast and out.result.status in {"FAILED", "FAILED_ROLLBACK"}:
+                break
+            continue
+        staged_for_apply.append(out)
+
+    for out in sorted(staged_for_apply, key=lambda r: r.index):
         backup_path: Path | None = None
         had_dest = False
-
         try:
-            if row.result == "FAIL":
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="SKIPPED",
-                        reason="precheck_result_is_fail",
-                    )
-                )
-                continue
-            if row.bucket == "system":
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="SKIPPED",
-                        reason="system_updates_disabled_per_policy",
-                    )
-                )
-                continue
-
-            if row.strategy == "update-via-github":
-                if row.repo in {"", "-"} or row.remote_path in {"", "-"}:
-                    raise RuntimeError("missing repo/remote_path in check file")
-                temp_root, staged = _stage_from_installer(
-                    skill=row.skill,
-                    repo=row.repo,
-                    skill_path=row.remote_path,
-                    ref="main",
-                    commands=commands,
-                )
-            elif row.strategy == "sync-from-claude-mirror":
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="SKIPPED",
-                        reason="claude_mirror_disabled_per_policy",
-                    )
-                )
-                continue
-            elif row.strategy == "install-from-local-archive":
-                temp_root, staged = _stage_from_archive(row.skill, row.note)
-            elif row.strategy in {"manual-source-map-required", "manual-system-source-map"}:
-                if not args.allow_manual_map:
-                    results.append(
-                        UpdateResult(
-                            skill=row.skill,
-                            strategy=row.strategy,
-                            status="SKIPPED",
-                            reason="manual_source_map_not_enabled",
-                        )
-                    )
-                    continue
-                cfg = source_map.get(row.skill)
-                if not cfg:
-                    results.append(
-                        UpdateResult(
-                            skill=row.skill,
-                            strategy=row.strategy,
-                            status="SKIPPED",
-                            reason="skill_not_found_in_source_map",
-                        )
-                    )
-                    continue
-                temp_root, staged = _stage_from_installer(
-                    skill=row.skill,
-                    repo=cfg["repo"],
-                    skill_path=cfg["path"],
-                    ref=cfg.get("ref", "main"),
-                    commands=commands,
-                )
-            else:
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="SKIPPED",
-                        reason="unsupported_strategy",
-                    )
-                )
-                continue
-
-            dest = _target_root(row.bucket) / row.skill
-            if dest.is_dir() and _fingerprint_tree(staged) == _fingerprint_tree(dest):
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="SKIPPED",
-                        reason="no_changes_detected",
-                        commands=commands,
-                    )
-                )
-                continue
-
-            if args.dry_run:
-                results.append(
-                    UpdateResult(
-                        skill=row.skill,
-                        strategy=row.strategy,
-                        status="DRY_RUN",
-                        reason="staged_and_validated",
-                        commands=commands,
-                    )
-                )
-                continue
-
-            backup_path, had_dest = _create_backup(row.skill, row.bucket, backup_root, args.no_backup)
-            _apply_staged(row.skill, row.bucket, staged)
-            results.append(
-                UpdateResult(
-                    skill=row.skill,
-                    strategy=row.strategy,
-                    status="SUCCESS",
-                    reason="updated",
-                    commands=commands,
-                    backup_path=str(backup_path) if backup_path else None,
-                )
+            backup_path, had_dest = _create_backup(out.row.skill, out.row.bucket, backup_root, args.no_backup)
+            _apply_staged(out.row.skill, out.row.bucket, out.staged)
+            ordered_results[out.index] = UpdateResult(
+                skill=out.row.skill,
+                strategy=out.row.strategy,
+                status="SUCCESS",
+                reason="updated",
+                commands=out.commands,
+                backup_path=str(backup_path) if backup_path else None,
             )
         except Exception as exc:
-            rollback = (
-                _restore_from_backup(row.skill, row.bucket, backup_path, had_dest)
-                if not args.dry_run
-                else "not_needed"
-            )
+            rollback = _restore_from_backup(out.row.skill, out.row.bucket, backup_path, had_dest)
             status = "FAILED" if rollback in {"restored_from_backup", "not_needed", "failed_no_backup"} else "FAILED_ROLLBACK"
-            results.append(
-                UpdateResult(
-                    skill=row.skill,
-                    strategy=row.strategy,
-                    status=status,
-                    reason=str(exc),
-                    commands=commands,
-                    backup_path=str(backup_path) if backup_path else None,
-                    rollback=rollback,
-                )
+            ordered_results[out.index] = UpdateResult(
+                skill=out.row.skill,
+                strategy=out.row.strategy,
+                status=status,
+                reason=str(exc),
+                commands=out.commands,
+                backup_path=str(backup_path) if backup_path else None,
+                rollback=rollback,
             )
             if args.fail_fast:
+                if out.temp_root and out.temp_root.exists():
+                    shutil.rmtree(out.temp_root, ignore_errors=True)
                 break
         finally:
-            if temp_root and temp_root.exists():
-                shutil.rmtree(temp_root, ignore_errors=True)
+            if out.temp_root and out.temp_root.exists():
+                shutil.rmtree(out.temp_root, ignore_errors=True)
+
+    results = [ordered_results[i] for i in sorted(ordered_results)]
 
     summary = {
         "total_rows": len(rows),
