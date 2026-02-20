@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply skill updates from check_skill_updates.tsv with safe rollback."""
+"""Apply skill updates from check output with safe rollback."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
@@ -26,6 +27,7 @@ DIST_ROOT = SKILLS_ROOT / "dist"
 INSTALLER_SCRIPT = SKILLS_ROOT / ".system" / "skill-installer" / "scripts" / "install-skill-from-github.py"
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
+DEFAULT_CHECK_FORMAT = "auto"
 
 
 def _default_source_map_paths() -> tuple[Path, Path]:
@@ -70,32 +72,75 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True, check=False)
 
 
-def _load_rows(path: Path) -> list[UpdateRow]:
-    rows: list[UpdateRow] = []
-    with path.open("r", encoding="utf-8") as fp:
-        reader = csv.DictReader(fp, delimiter="\t")
-        for row in reader:
-            def norm(key: str) -> str:
-                value = row.get(key, "")
-                if value is None:
-                    return ""
-                return str(value).strip()
+def _normalize_row_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
-            skill = norm("skill")
-            if not skill or skill.startswith("summary:"):
-                continue
-            rows.append(
-                UpdateRow(
-                    skill=skill,
-                    bucket=norm("bucket"),
-                    result=norm("result"),
-                    strategy=norm("strategy"),
-                    repo=norm("repo"),
-                    remote_path=norm("remote_path"),
-                    note=norm("note"),
-                )
-            )
+
+def _to_update_row(raw: dict[str, Any]) -> UpdateRow:
+    return UpdateRow(
+        skill=_normalize_row_value(raw.get("skill", "")),
+        bucket=_normalize_row_value(raw.get("bucket", "")),
+        result=_normalize_row_value(raw.get("result", "")),
+        strategy=_normalize_row_value(raw.get("strategy", "")),
+        repo=_normalize_row_value(raw.get("repo", "")),
+        remote_path=_normalize_row_value(raw.get("remote_path", "")),
+        note=_normalize_row_value(raw.get("note", "")),
+    )
+
+
+def _load_rows_from_tsv_text(raw_text: str) -> list[UpdateRow]:
+    rows: list[UpdateRow] = []
+    reader = csv.DictReader(io.StringIO(raw_text), delimiter="\t")
+    for row in reader:
+        parsed = _to_update_row(row)
+        if not parsed.skill or parsed.skill.startswith("summary:"):
+            continue
+        rows.append(parsed)
     return rows
+
+
+def _load_rows_from_ndjson_text(raw_text: str) -> list[UpdateRow]:
+    rows: list[UpdateRow] = []
+    for line_no, raw_line in enumerate(raw_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid ndjson at line {line_no}: {exc.msg}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid ndjson object at line {line_no}")
+        line_type = _normalize_row_value(payload.get("type", "row"))
+        if line_type == "summary":
+            continue
+        if line_type not in {"", "row"}:
+            continue
+        parsed = _to_update_row(payload)
+        if not parsed.skill or parsed.skill.startswith("summary:"):
+            continue
+        rows.append(parsed)
+    return rows
+
+
+def _detect_check_format(raw_text: str) -> str:
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("{"):
+            return "ndjson"
+        return "tsv"
+    return "tsv"
+
+
+def _load_rows(raw_text: str, check_format: str) -> list[UpdateRow]:
+    resolved_format = _detect_check_format(raw_text) if check_format == "auto" else check_format
+    if resolved_format == "ndjson":
+        return _load_rows_from_ndjson_text(raw_text)
+    return _load_rows_from_tsv_text(raw_text)
 
 
 def _load_source_map(path: Path) -> dict[str, dict[str, str]]:
@@ -154,11 +199,22 @@ def _fingerprint_tree(root: Path) -> str:
             digest.update(b"F")
             digest.update(rel)
             digest.update(b"\0")
+            exec_bits = path.stat(follow_symlinks=False).st_mode & 0o111
+            digest.update(f"X{exec_bits:o}".encode("ascii"))
+            digest.update(b"\0")
             with path.open("rb") as fp:
                 for chunk in iter(lambda: fp.read(1024 * 1024), b""):
                     digest.update(chunk)
             digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _self_skill_name() -> str | None:
+    scripts_dir = Path(__file__).resolve().parent
+    if scripts_dir.name != "scripts":
+        return None
+    name = scripts_dir.parent.name.strip()
+    return name or None
 
 
 def _read_archive_path_from_note(note: str) -> Path | None:
@@ -278,8 +334,14 @@ def _filter_rows(rows: list[UpdateRow], strategies: set[str], skills: set[str]) 
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Apply Codex skill updates from TSV.")
+    parser = argparse.ArgumentParser(description="Apply Codex skill updates from check output.")
     parser.add_argument("--check-file", default="-")
+    parser.add_argument(
+        "--check-format",
+        choices=["auto", "ndjson", "tsv"],
+        default=DEFAULT_CHECK_FORMAT,
+        help=f"Format of check input (default: {DEFAULT_CHECK_FORMAT})",
+    )
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
@@ -474,17 +536,14 @@ def main(argv: list[str]) -> int:
         source_map_local_path = Path(args.source_map_local).resolve() if args.source_map_local else default_local_map.resolve()
         source_map = _load_merged_source_map(source_map_path, source_map_local_path)
 
-    if args.check_file == "-":
-        fd, tmp_name = tempfile.mkstemp(prefix="skill-check-", suffix=".tsv")
-        os.close(fd)
-        tmp_check = Path(tmp_name)
-        try:
-            tmp_check.write_text(sys.stdin.read(), encoding="utf-8")
-            rows = _load_rows(tmp_check)
-        finally:
-            tmp_check.unlink(missing_ok=True)
-    else:
-        rows = _load_rows(check_file)
+    check_text = sys.stdin.read() if args.check_file == "-" else check_file.read_text(encoding="utf-8")
+    try:
+        rows = _load_rows(check_text, args.check_format)
+    except ValueError as exc:
+        print(f"Error: failed to parse check input: {exc}", file=sys.stderr)
+        return 2
+
+    self_skill_name = _self_skill_name()
     selected = _filter_rows(rows, strategies, skills)
     jobs = _normalize_jobs(args.jobs, args.fail_fast)
     ordered_results: dict[int, UpdateResult] = {}
@@ -506,6 +565,14 @@ def main(argv: list[str]) -> int:
                 strategy=row.strategy,
                 status="SKIPPED",
                 reason="system_updates_disabled_per_policy",
+            )
+            continue
+        if os.name == "nt" and self_skill_name and row.skill == self_skill_name:
+            ordered_results[idx] = UpdateResult(
+                skill=row.skill,
+                strategy=row.strategy,
+                status="SKIPPED",
+                reason="self_update_disabled_on_windows_file_lock",
             )
             continue
         stage_inputs.append((idx, row))

@@ -16,7 +16,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 CHECK_SCRIPT = SCRIPT_DIR / "check_skill_updates.py"
 APPLY_SCRIPT = SCRIPT_DIR / "apply_skill_updates.py"
-DEBUG_CHECK_FILE = "skill_update_check.debug.tsv"
+DEBUG_CHECK_FILE = "skill_update_check.debug.ndjson"
 DEBUG_REPORT_FILE = "skill_update_apply_report.debug.json"
 
 
@@ -42,7 +42,7 @@ def main(argv: list[str]) -> int:
     args = _parse_args(argv)
 
     check_proc = subprocess.run(
-        ["python3", str(CHECK_SCRIPT), "--jobs", str(args.jobs)],
+        ["python3", str(CHECK_SCRIPT), "--format", "ndjson", "--jobs", str(args.jobs)],
         text=True,
         capture_output=True,
         check=False,
@@ -58,7 +58,16 @@ def main(argv: list[str]) -> int:
     if args.debug_artifacts:
         Path(DEBUG_CHECK_FILE).write_text(check_output, encoding="utf-8")
 
-    apply_cmd = ["python3", str(APPLY_SCRIPT), "--check-file", "-", "--jobs", str(args.jobs)]
+    apply_cmd = [
+        "python3",
+        str(APPLY_SCRIPT),
+        "--check-file",
+        "-",
+        "--check-format",
+        "ndjson",
+        "--jobs",
+        str(args.jobs),
+    ]
     if args.dry_run:
         apply_cmd.append("--dry-run")
     if args.allow_manual_map:

@@ -23,6 +23,7 @@ INSTALL_SCRIPT = INSTALLER_DIR / "install-skill-from-github.py"
 DEFAULT_REF = "main"
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
+DEFAULT_FORMAT = "ndjson"
 
 
 @dataclass
@@ -193,6 +194,12 @@ def _strategy_for_skip(
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Preflight-check whether installed Codex skills can be updated safely.")
     parser.add_argument(
+        "--format",
+        choices=["ndjson", "tsv"],
+        default=DEFAULT_FORMAT,
+        help=f"Output format (default: {DEFAULT_FORMAT})",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=DEFAULT_JOBS,
@@ -212,15 +219,7 @@ def _evaluate_skill(
     anthropics_skills: set[str],
 ) -> SkillEntry:
     name, local_path, source_bucket, meta = item
-    candidates = _resolve_candidates(
-        name=name,
-        source_bucket=source_bucket,
-        meta=meta,
-        openai_curated=openai_curated,
-        openai_system=openai_system,
-        anthropics_skills=anthropics_skills,
-    )
-    if not candidates:
+    if local_path.is_symlink():
         strategy, strategy_note = _strategy_for_skip(
             name,
             local_path,
@@ -237,7 +236,15 @@ def _evaluate_skill(
             note=strategy_note,
         )
 
-    if local_path.is_symlink():
+    candidates = _resolve_candidates(
+        name=name,
+        source_bucket=source_bucket,
+        meta=meta,
+        openai_curated=openai_curated,
+        openai_system=openai_system,
+        anthropics_skills=anthropics_skills,
+    )
+    if not candidates:
         strategy, strategy_note = _strategy_for_skip(
             name,
             local_path,
@@ -309,21 +316,50 @@ def main(argv: list[str]) -> int:
             )
     rows = sorted(rows, key=lambda r: r.name)
 
-    print("skill\tbucket\tresult\tstrategy\trepo\tremote_path\tnote")
-    for row in rows:
-        print(
-            f"{row.name}\t{row.source_bucket}\t{row.check}\t"
-            f"{row.strategy}\t"
-            f"{row.remote_repo or '-'}\t"
-            f"{row.remote_path or '-'}\t{row.note}"
-        )
-
     total = len(rows)
     ok = sum(1 for r in rows if r.check == "OK")
     fail = sum(1 for r in rows if r.check == "FAIL")
     skip = sum(1 for r in rows if r.check == "SKIP")
-    print("")
-    print(f"summary: total={total} ok={ok} fail={fail} skip={skip}")
+    if args.format == "tsv":
+        print("skill\tbucket\tresult\tstrategy\trepo\tremote_path\tnote")
+        for row in rows:
+            print(
+                f"{row.name}\t{row.source_bucket}\t{row.check}\t"
+                f"{row.strategy}\t"
+                f"{row.remote_repo or '-'}\t"
+                f"{row.remote_path or '-'}\t{row.note}"
+            )
+        print("")
+        print(f"summary: total={total} ok={ok} fail={fail} skip={skip}")
+    else:
+        for row in rows:
+            print(
+                json.dumps(
+                    {
+                        "type": "row",
+                        "skill": row.name,
+                        "bucket": row.source_bucket,
+                        "result": row.check,
+                        "strategy": row.strategy,
+                        "repo": row.remote_repo,
+                        "remote_path": row.remote_path,
+                        "note": row.note,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        print(
+            json.dumps(
+                {
+                    "type": "summary",
+                    "total": total,
+                    "ok": ok,
+                    "fail": fail,
+                    "skip": skip,
+                },
+                ensure_ascii=False,
+            )
+        )
     return 1 if fail else 0
 
 
