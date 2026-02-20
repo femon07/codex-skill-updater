@@ -29,6 +29,11 @@
     "path": "skills/lead-research-assistant",
     "ref": "main"
   },
+  "codex-skill-updater": {
+    "repo": "femon07/skill-updater",
+    "path": "codex-skill-updater",
+    "ref": "main"
+  },
   "video-downloader": {
     "repo": "skillcreatorai/ai-agent-skills",
     "path": "skills/video-downloader",
