@@ -7,6 +7,12 @@ description: Update installed user Codex skills safely with prechecks, strategy-
 
 Use this skill when you want to keep installed user skills up to date in `~/.codex/skills` and handle mixed sources (GitHub, source-map, local archive, private repos).
 
+## Prerequisites
+
+- Required: `python3`, `git`
+- Optional: `gh` (not required)
+- For private GitHub repos: SSH auth must be configured in this environment (`ssh -T git@github.com`)
+
 ## Quick Start
 
 1. Move to this skill directory.

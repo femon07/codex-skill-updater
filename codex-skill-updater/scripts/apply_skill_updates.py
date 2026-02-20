@@ -31,9 +31,7 @@ MAX_JOBS = 8
 def _default_source_map_paths() -> tuple[Path, Path]:
     script_dir = Path(__file__).resolve().parent
     config_dir = script_dir.parent / "config"
-    if config_dir.is_dir():
-        return config_dir / "skills_source_map.json", config_dir / "skills_source_map.local.json"
-    return Path("skills_source_map.json"), Path("skills_source_map.local.json")
+    return config_dir / "skills_source_map.json", config_dir / "skills_source_map.local.json"
 
 
 @dataclass

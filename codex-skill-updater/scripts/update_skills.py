@@ -8,7 +8,6 @@ Debug mode: writes fixed artifact files in current directory.
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,18 +41,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
 
-    env = os.environ.copy()
-    if not env.get("GH_TOKEN") and not env.get("GITHUB_TOKEN"):
-        gh_token = _run(["gh", "auth", "token"])
-        if gh_token.returncode == 0 and gh_token.stdout.strip():
-            env["GH_TOKEN"] = gh_token.stdout.strip()
-
     check_proc = subprocess.run(
         ["python3", str(CHECK_SCRIPT), "--jobs", str(args.jobs)],
         text=True,
         capture_output=True,
         check=False,
-        env=env,
     )
     if check_proc.returncode != 0:
         if check_proc.stdout:

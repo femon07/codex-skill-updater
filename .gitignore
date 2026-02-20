@@ -5,7 +5,6 @@ backups/
 
 skill_update_check*.tsv
 skill_update_apply_report*.json
-skills_source_map.local.json
-skill-updater/config/skills_source_map.local.json
+codex-skill-updater/config/skills_source_map.local.json
 
 .DS_Store
