@@ -34,6 +34,11 @@
     "path": "skills/lead-research-assistant",
     "ref": "main"
   },
+  "skill-updater": {
+    "repo": "owner/private-skill-updater",
+    "path": "skill-updater",
+    "ref": "main"
+  },
   "video-downloader": {
     "repo": "skillcreatorai/ai-agent-skills",
     "path": "skills/video-downloader",
