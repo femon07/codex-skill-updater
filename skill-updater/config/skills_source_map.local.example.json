@@ -1,0 +1,12 @@
+{
+  "codex-official-agent-impl": {
+    "repo": "owner/private-codex-official-agent-impl",
+    "path": ".",
+    "ref": "main"
+  },
+  "skill-updater": {
+    "repo": "owner/private-skill-updater",
+    "path": "skill-updater",
+    "ref": "main"
+  }
+}

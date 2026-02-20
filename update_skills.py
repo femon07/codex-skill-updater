@@ -30,6 +30,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
+    parser.add_argument("--source-map-local", default="")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
@@ -72,6 +73,8 @@ def main(argv: list[str]) -> int:
         apply_cmd.append("--allow-manual-map")
     if args.source_map:
         apply_cmd.extend(["--source-map", args.source_map])
+    if args.source_map_local:
+        apply_cmd.extend(["--source-map-local", args.source_map_local])
     if args.fail_fast:
         apply_cmd.append("--fail-fast")
     if args.debug_artifacts:

@@ -14,11 +14,6 @@
     "path": "skills/code-refactoring",
     "ref": "main"
   },
-  "codex-official-agent-impl": {
-    "repo": "owner/private-codex-official-agent-impl",
-    "path": ".",
-    "ref": "main"
-  },
   "competitive-ads-extractor": {
     "repo": "skillcreatorai/ai-agent-skills",
     "path": "skills/competitive-ads-extractor",
@@ -32,11 +27,6 @@
   "lead-research-assistant": {
     "repo": "skillcreatorai/ai-agent-skills",
     "path": "skills/lead-research-assistant",
-    "ref": "main"
-  },
-  "skill-updater": {
-    "repo": "owner/private-skill-updater",
-    "path": "skill-updater",
     "ref": "main"
   },
   "video-downloader": {

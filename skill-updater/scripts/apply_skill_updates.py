@@ -28,12 +28,12 @@ DEFAULT_JOBS = 4
 MAX_JOBS = 8
 
 
-def _default_source_map_path() -> Path:
+def _default_source_map_paths() -> tuple[Path, Path]:
     script_dir = Path(__file__).resolve().parent
-    bundled = script_dir.parent / "config" / "skills_source_map.json"
-    if bundled.is_file():
-        return bundled
-    return Path("skills_source_map.json")
+    config_dir = script_dir.parent / "config"
+    if config_dir.is_dir():
+        return config_dir / "skills_source_map.json", config_dir / "skills_source_map.local.json"
+    return Path("skills_source_map.json"), Path("skills_source_map.local.json")
 
 
 @dataclass
@@ -117,6 +117,12 @@ def _load_source_map(path: Path) -> dict[str, dict[str, str]]:
         if repo and spath:
             out[str(skill)] = {"repo": repo, "path": spath, "ref": ref}
     return out
+
+
+def _load_merged_source_map(public_path: Path, local_path: Path) -> dict[str, dict[str, str]]:
+    merged = _load_source_map(public_path)
+    merged.update(_load_source_map(local_path))
+    return merged
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
@@ -283,6 +289,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
+    parser.add_argument("--source-map-local", default="")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--report", default="")
     parser.add_argument("--debug-artifacts", action="store_true")
@@ -462,9 +469,12 @@ def main(argv: list[str]) -> int:
 
     source_map = {}
     source_map_path: Path | None = None
+    source_map_local_path: Path | None = None
     if args.allow_manual_map:
-        source_map_path = Path(args.source_map).resolve() if args.source_map else _default_source_map_path().resolve()
-        source_map = _load_source_map(source_map_path)
+        default_public_map, default_local_map = _default_source_map_paths()
+        source_map_path = Path(args.source_map).resolve() if args.source_map else default_public_map.resolve()
+        source_map_local_path = Path(args.source_map_local).resolve() if args.source_map_local else default_local_map.resolve()
+        source_map = _load_merged_source_map(source_map_path, source_map_local_path)
 
     if args.check_file == "-":
         fd, tmp_name = tempfile.mkstemp(prefix="skill-check-", suffix=".tsv")
@@ -577,6 +587,7 @@ def main(argv: list[str]) -> int:
         "backup_root": str(backup_root),
         "source_map_used": args.allow_manual_map,
         "source_map_path": str(source_map_path) if source_map_path else None,
+        "source_map_local_path": str(source_map_local_path) if source_map_local_path else None,
         "summary": summary,
         "results": [r.__dict__ for r in results],
     }

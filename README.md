@@ -18,6 +18,18 @@
 - `gh`（GitHub CLI、private repo を使う場合はログイン済み推奨）
 - `~/.codex/skills/.system/skill-installer` が存在すること
 
+## source_map の扱い（公開/ローカル）
+
+- `skills_source_map.json`: 追跡対象。公開して問題ないマップのみ入れる
+- `skills_source_map.local.json`: ローカル専用（`.gitignore` 済み）
+- private repo の情報は必ず `*.local.json` 側に入れる
+
+初回作成:
+
+```bash
+cp skills_source_map.local.example.json skills_source_map.local.json
+```
+
 ## まず使うコマンド
 
 リポジトリ配下で実行します。
@@ -28,12 +40,14 @@ python3 skill-updater/scripts/update_skills.py \
   --dry-run \
   --allow-manual-map \
   --source-map ./skills_source_map.json \
+  --source-map-local ./skills_source_map.local.json \
   --jobs 4
 
 # 本番更新
 python3 skill-updater/scripts/update_skills.py \
   --allow-manual-map \
   --source-map ./skills_source_map.json \
+  --source-map-local ./skills_source_map.local.json \
   --jobs 4
 ```
 
@@ -46,6 +60,7 @@ python3 skill-updater/scripts/update_skills.py \
   --dry-run \
   --allow-manual-map \
   --source-map ./skills_source_map.json \
+  --source-map-local ./skills_source_map.local.json \
   --jobs 4 \
   --debug-artifacts
 ```
@@ -69,7 +84,8 @@ python3 skill-updater/scripts/update_skills.py \
 
 ## source_map（手動マップ）
 
-`manual-source-map-required` のスキルは `skills_source_map.json` に登録します。
+`manual-source-map-required` のスキルは source_map に登録します。  
+private 情報は `skills_source_map.local.json` にのみ登録してください。
 
 ```json
 {
@@ -94,4 +110,3 @@ python3 skill-updater/scripts/update_skills.py \
 - `skill-updater/scripts/check_skill_updates.py`: 事前チェック
 - `skill-updater/scripts/apply_skill_updates.py`: 実更新
 - `skills_source_map.json`: 手動マップ
-
