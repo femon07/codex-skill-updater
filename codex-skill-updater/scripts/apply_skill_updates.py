@@ -24,10 +24,12 @@ from typing import Any
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 SKILLS_ROOT = CODEX_HOME / "skills"
 DIST_ROOT = SKILLS_ROOT / "dist"
+BACKUPS_ROOT = CODEX_HOME / "backups"
 INSTALLER_SCRIPT = SKILLS_ROOT / ".system" / "skill-installer" / "scripts" / "install-skill-from-github.py"
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
 DEFAULT_CHECK_FORMAT = "auto"
+DEFAULT_BACKUP_KEEP_GENERATIONS = 2
 
 
 def _default_source_map_paths() -> tuple[Path, Path]:
@@ -281,13 +283,44 @@ def _target_root(bucket: str) -> Path:
     return SKILLS_ROOT / ".system" if bucket == "system" else SKILLS_ROOT
 
 
+def _default_backup_root(ts: str) -> Path:
+    return BACKUPS_ROOT / ts
+
+
+def _is_subpath(path: Path, parent: Path) -> bool:
+    path_resolved = path.resolve()
+    parent_resolved = parent.resolve()
+    try:
+        path_resolved.relative_to(parent_resolved)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_backup_location(dest: Path, candidate: Path, label: str) -> None:
+    if _is_subpath(candidate, dest):
+        raise RuntimeError(
+            f"unsafe {label}: {candidate} is inside update target {dest}"
+        )
+
+
+def _prune_backup_generations(backups_root: Path, keep: int = DEFAULT_BACKUP_KEEP_GENERATIONS) -> None:
+    if keep < 1 or not backups_root.is_dir():
+        return
+    generations = sorted([p for p in backups_root.iterdir() if p.is_dir()], key=lambda p: p.name)
+    for stale in generations[:-keep]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def _create_backup(skill: str, bucket: str, backup_root: Path, no_backup: bool) -> tuple[Path | None, bool]:
     dest = _target_root(bucket) / skill
+    _validate_backup_location(dest, backup_root, "backup_root")
     if no_backup or not dest.exists():
         return None, dest.exists()
     backup_root.mkdir(parents=True, exist_ok=True)
     backup_rel = f"{bucket}__{skill}"
     backup_path = backup_root / backup_rel
+    _validate_backup_location(dest, backup_path, "backup_path")
     _copy_tree(dest, backup_path)
     return backup_path, True
 
@@ -345,7 +378,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--backup-root", default="")
+    parser.add_argument(
+        "--backup-root",
+        default="",
+        help="DEPRECATED: custom backup root is no longer supported",
+    )
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
@@ -511,6 +548,13 @@ def main(argv: list[str]) -> int:
     args = _parse_args(argv)
     if args.debug_artifacts and not args.report:
         args.report = "skill_update_apply_report.debug.json"
+    if args.backup_root:
+        print(
+            "Error: --backup-root is no longer supported. "
+            "Backups are always written under $CODEX_HOME/backups/<timestamp>.",
+            file=sys.stderr,
+        )
+        return 2
     check_file: Path | None = None
     if args.check_file != "-":
         check_file = Path(args.check_file).resolve()
@@ -522,7 +566,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_root = Path(args.backup_root).resolve() if args.backup_root else (Path.cwd() / "backups" / ts)
+    backup_root = _default_backup_root(ts)
     report_path = Path(args.report).resolve() if args.report else None
     strategies = {s.strip() for s in args.strategy if s.strip()}
     skills = {s.strip() for s in args.skill if s.strip()}
@@ -645,6 +689,9 @@ def main(argv: list[str]) -> int:
         "skipped": sum(1 for r in results if r.status == "SKIPPED"),
         "dry_run": sum(1 for r in results if r.status == "DRY_RUN"),
     }
+    if summary["failed"] == 0 and not args.dry_run and not args.no_backup:
+        _prune_backup_generations(BACKUPS_ROOT, keep=DEFAULT_BACKUP_KEEP_GENERATIONS)
+
     report: dict[str, Any] = {
         "generated_at": dt.datetime.now().isoformat(),
         "dry_run": args.dry_run,

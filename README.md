@@ -43,15 +43,18 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 ## 仕様（更新時の挙動）
 
 - `check_skill_updates.py` の strategy は `update-via-github` / `install-from-local-archive` / `manual-source-map-required`
-- バックアップとロールバックあり
+- バックアップとロールバックあり（保存先は常に `$CODEX_HOME/backups/<timestamp>`）
+- バックアップは実行単位で最新2世代を保持し、更新処理が失敗なしで完了した場合のみ古い世代を削除
 - 同一版で更新不要なら更新しない（スキップ）
 - 更新が必要かの確認時は並列実行。最終更新は直列実行。
+- `--backup-root` での保存先指定はサポートしない（固定先のみ）
 
 ## source_map 運用
 
 - `codex-skill-updater/config/skills_source_map.json`: Git追跡対象（公開してよい情報のみ）
 - `codex-skill-updater/config/skills_source_map.local.json`: GitHubのprivateリポジトリなどローカル専用（`.gitignore`）
 - 同じ skill キーが両方にある場合、`skills_source_map.local.json` が優先されます。
+- `skills_source_map.local.json` の内容が `skills_source_map.json` を上書きするため、ダミー値を入れると更新失敗要因になります。
 
 ## 主なファイル
 

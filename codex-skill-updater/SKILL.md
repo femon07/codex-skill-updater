@@ -70,13 +70,15 @@ Use this format:
 
 ## Safety Rules
 
-- Default behavior creates backups under `backups/<timestamp>/`.
+- Default behavior creates backups under `$CODEX_HOME/backups/<timestamp>/`.
+- Backup generations are retained per run (latest 2 generations) and pruned only when an update run completes without failures.
 - On failure, rollback is attempted automatically.
 - If staged content is identical to installed content, update is skipped (`no_changes_detected`).
 - `--jobs` controls parallelism for precheck/probing and staging (recommended: `3-4`, max `8`).
 - Safety model: staging runs in parallel, but final apply+rollback runs serially.
 - Use `--fail-fast` to stop on first failure.
 - Use `--strategy` and `--skill` to run partial updates safely.
+- `--backup-root` custom path is not supported.
 
 ## Notes
 
