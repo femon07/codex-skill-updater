@@ -10,21 +10,30 @@
 - `git`: GitHub から skill を取得（public/private 両方）
 
 private repo を更新する場合は、実行環境で GitHub SSH 認証を事前設定してください。  
-例: `ssh -T git@github.com`でログイン可能な状態にしておく
+例: `ssh -T git@github.com` でログイン可能な状態にしておく
 
-## 使い方（通常）
+## クイックスタート
 
-1. インストール
-まず、Codex にこのスキルをインストールするよう指示すると、codex組み込みの `skill-installer` スキルを利用してインストールされます。
+1. スキルをインストール
+- Codex に「このリポのスキルをインストールして」と指示します。
 
-2. 更新実施
-Codexに次のように指示します。
-- 「インストール済みスキルを最新化して」
-- 「更新可能なスキルが有るか確認して」
+2. スキルディレクトリへ移動
+- `cd ~/.codex/skills/codex-skill-updater`
 
-※更新前の確認フェーズで、差分がないものは更新不要なのでスキップします。
+3. 初回のみ local source map を作成
+- `cp config/skills_source_map.local.example.json config/skills_source_map.local.json`
 
-### 実行時に内部で使う主なコマンド
+4. ドライラン
+- `python3 scripts/update_skills.py --dry-run --allow-manual-map --source-map ./config/skills_source_map.json --source-map-local ./config/skills_source_map.local.json --jobs 4`
+
+5. 問題なければ本適用
+- `python3 scripts/update_skills.py --allow-manual-map --source-map ./config/skills_source_map.json --source-map-local ./config/skills_source_map.local.json --jobs 4`
+
+6. 必要時のみデバッグ出力
+- `python3 scripts/update_skills.py --dry-run --allow-manual-map --source-map ./config/skills_source_map.json --source-map-local ./config/skills_source_map.local.json --debug-artifacts`
+- 出力: `skill_update_check.debug.ndjson`, `skill_update_apply_report.debug.json`
+
+## 実行時に内部で使う主なコマンド
 
 - `python3 codex-skill-updater/scripts/check_skill_updates.py`: インストール済み skill の更新可否を確認
 - `python3 codex-skill-updater/scripts/apply_skill_updates.py`: 判定結果に基づいて安全に更新
@@ -33,6 +42,7 @@ Codexに次のように指示します。
 
 ## 仕様（更新時の挙動）
 
+- `check_skill_updates.py` の strategy は `update-via-github` / `install-from-local-archive` / `manual-source-map-required`
 - バックアップとロールバックあり
 - 同一版で更新不要なら更新しない（スキップ）
 - 更新が必要かの確認時は並列実行。最終更新は直列実行。
@@ -41,6 +51,7 @@ Codexに次のように指示します。
 
 - `codex-skill-updater/config/skills_source_map.json`: Git追跡対象（公開してよい情報のみ）
 - `codex-skill-updater/config/skills_source_map.local.json`: GitHubのprivateリポジトリなどローカル専用（`.gitignore`）
+- 同じ skill キーが両方にある場合、`skills_source_map.local.json` が優先されます。
 
 ## 主なファイル
 

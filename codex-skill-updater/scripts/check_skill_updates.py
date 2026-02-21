@@ -169,17 +169,11 @@ def _resolve_candidates(
 
 def _strategy_for_skip(
     name: str,
-    local_path: Path,
     meta: dict,
 ) -> tuple[str, str]:
     source = str(meta.get("source", "unknown"))
     dist_skill = DIST_ROOT / f"{name}.skill"
 
-    if local_path.is_symlink():
-        return (
-            "update-source-repo",
-            f"symlink targetを更新して反映 ({local_path.resolve()})",
-        )
     if dist_skill.is_file():
         return (
             "install-from-local-archive",
@@ -219,23 +213,6 @@ def _evaluate_skill(
     anthropics_skills: set[str],
 ) -> SkillEntry:
     name, local_path, source_bucket, meta = item
-    if local_path.is_symlink():
-        strategy, strategy_note = _strategy_for_skip(
-            name,
-            local_path,
-            meta,
-        )
-        return SkillEntry(
-            name=name,
-            local_path=local_path,
-            source_bucket=source_bucket,
-            remote_repo=None,
-            remote_path=None,
-            check="SKIP",
-            strategy=strategy,
-            note=strategy_note,
-        )
-
     candidates = _resolve_candidates(
         name=name,
         source_bucket=source_bucket,
@@ -247,7 +224,6 @@ def _evaluate_skill(
     if not candidates:
         strategy, strategy_note = _strategy_for_skip(
             name,
-            local_path,
             meta,
         )
         return SkillEntry(
