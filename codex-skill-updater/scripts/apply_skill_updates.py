@@ -24,12 +24,12 @@ from typing import Any
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 SKILLS_ROOT = CODEX_HOME / "skills"
 DIST_ROOT = SKILLS_ROOT / "dist"
-BACKUPS_ROOT = CODEX_HOME / "backups"
+BACKUPS_ROOT = CODEX_HOME / "skill-updater-backups"
 INSTALLER_SCRIPT = SKILLS_ROOT / ".system" / "skill-installer" / "scripts" / "install-skill-from-github.py"
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
 DEFAULT_CHECK_FORMAT = "auto"
-DEFAULT_BACKUP_KEEP_GENERATIONS = 2
+DEFAULT_BACKUP_KEEP_GENERATIONS = 3
 IGNORED_UPDATE_DIRS = {".git"}
 PLACEHOLDER_REPO_TOKENS = {
     "owner",
@@ -634,7 +634,7 @@ def main(argv: list[str]) -> int:
     if args.backup_root:
         print(
             "Error: --backup-root is no longer supported. "
-            "Backups are always written under $CODEX_HOME/backups/<timestamp>.",
+            "Backups are always written under $CODEX_HOME/skill-updater-backups/<timestamp>.",
             file=sys.stderr,
         )
         return 2

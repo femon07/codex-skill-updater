@@ -34,6 +34,10 @@ class ApplySkillUpdatesTests(unittest.TestCase):
             code = self.mod.main(args)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def test_backup_root_and_retention_defaults(self):
+        self.assertEqual(self.mod.BACKUPS_ROOT.name, "skill-updater-backups")
+        self.assertEqual(self.mod.DEFAULT_BACKUP_KEEP_GENERATIONS, 3)
+
     def test_load_merged_source_map_local_overrides_public(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

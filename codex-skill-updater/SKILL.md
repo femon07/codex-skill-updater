@@ -72,8 +72,8 @@ Use this format:
 
 ## Safety Rules
 
-- Default behavior creates backups under `$CODEX_HOME/backups/<timestamp>/`.
-- Backup generations are retained per run (latest 2 generations) and pruned only when an update run completes without failures.
+- Default behavior creates backups under `$CODEX_HOME/skill-updater-backups/<timestamp>/`.
+- Backup generations are retained per run (latest 3 generations) and pruned only when an update run completes without failures.
 - On failure, rollback is attempted automatically.
 - If staged content is identical to installed content, update is skipped (`no_changes_detected`).
 - `--jobs` controls parallelism for precheck/probing and staging (recommended: `3-4`, max `8`).
@@ -92,3 +92,4 @@ Use this format:
 - Restart Codex after updates to ensure new skill contents are picked up.
 - `apply_skill_updates.py` can read check input (`ndjson` or `tsv`) from stdin with `--check-file -` and `--check-format`.
 - While developing this skill, run scoped updates: `--skill codex-skill-updater`.
+- Legacy backup directories from old versions should be migrated once and then removed.
