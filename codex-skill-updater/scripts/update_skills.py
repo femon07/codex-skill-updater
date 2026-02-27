@@ -30,11 +30,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
     parser.add_argument("--source-map-local", default="")
+    parser.add_argument("--strict-config", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--strategy", action="append", default=[])
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--debug-artifacts", action="store_true")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--list-retries", type=int, default=3)
     return parser.parse_args(argv)
 
 
@@ -42,7 +44,16 @@ def main(argv: list[str]) -> int:
     args = _parse_args(argv)
 
     check_proc = subprocess.run(
-        ["python3", str(CHECK_SCRIPT), "--format", "ndjson", "--jobs", str(args.jobs)],
+        [
+            "python3",
+            str(CHECK_SCRIPT),
+            "--format",
+            "ndjson",
+            "--jobs",
+            str(args.jobs),
+            "--list-retries",
+            str(args.list_retries),
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -76,6 +87,8 @@ def main(argv: list[str]) -> int:
         apply_cmd.extend(["--source-map", args.source_map])
     if args.source_map_local:
         apply_cmd.extend(["--source-map-local", args.source_map_local])
+    if args.strict_config:
+        apply_cmd.append("--strict-config")
     if args.fail_fast:
         apply_cmd.append("--fail-fast")
     if args.debug_artifacts:

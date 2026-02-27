@@ -48,6 +48,9 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - 同一版で更新不要なら更新しない（スキップ）
 - 更新が必要かの確認時は並列実行。最終更新は直列実行。
 - `--backup-root` での保存先指定はサポートしない（固定先のみ）
+- `source_map` の設定不備は `CONFIG_ERROR` として分類（実装不具合と分離）
+- `--strict-config` 指定時は `CONFIG_ERROR` が1件でもあると終了コード `3`
+- GitHub catalog 取得（`list-skills`）は自動リトライし、失敗時はローカルキャッシュへフォールバック
 
 ## source_map 運用
 
@@ -55,6 +58,21 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - `codex-skill-updater/config/skills_source_map.local.json`: GitHubのprivateリポジトリなどローカル専用（`.gitignore`）
 - 同じ skill キーが両方にある場合、`skills_source_map.local.json` が優先されます。
 - `skills_source_map.local.json` の内容が `skills_source_map.json` を上書きするため、ダミー値を入れると更新失敗要因になります。
+- 同名skillは `skills_source_map.local.json` が `skills_source_map.json` を上書き
+- `owner/repo` などプレースホルダ値は `CONFIG_ERROR` 扱い
+
+## トラブルシュート
+
+- `Repository not found` / `Could not read from remote repository`:
+  - `repo` が実在の `owner/repo` か確認
+  - private repo の場合は `ssh -T git@github.com` で認証確認
+- `Failed to fetch skills: HTTP 403`:
+  - `check` は自動リトライ後にキャッシュへフォールバック
+  - 必要なら `--list-retries` を増やして実行
+- `CONFIG_ERROR` が出るが他更新は進めたい:
+  - デフォルト挙動のまま実行（対象skillのみスキップ）
+- `CONFIG_ERROR` をCIで失敗扱いしたい:
+  - `python3 codex-skill-updater/scripts/update_skills.py ... --strict-config`
 
 ## 主なファイル
 

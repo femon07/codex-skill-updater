@@ -67,6 +67,8 @@ Use this format:
 - `path` may be `.` when the skill is at repo root.
 - You can override source map path via `--source-map /path/to/skills_source_map.json`.
 - You can set local private map path via `--source-map-local /path/to/skills_source_map.local.json`.
+- `skills_source_map.local.json` entries override `skills_source_map.json` for the same skill name.
+- `owner/repo` placeholders are treated as invalid config.
 
 ## Safety Rules
 
@@ -75,13 +77,18 @@ Use this format:
 - On failure, rollback is attempted automatically.
 - If staged content is identical to installed content, update is skipped (`no_changes_detected`).
 - `--jobs` controls parallelism for precheck/probing and staging (recommended: `3-4`, max `8`).
+- `--list-retries` controls retry count for GitHub catalog fetch in precheck (default: `3`).
 - Safety model: staging runs in parallel, but final apply+rollback runs serially.
 - Use `--fail-fast` to stop on first failure.
 - Use `--strategy` and `--skill` to run partial updates safely.
 - `--backup-root` custom path is not supported.
+- `CONFIG_ERROR` means source-map config/auth issues, not updater logic failure.
+- Use `--strict-config` to fail the command when any `CONFIG_ERROR` exists.
+- Catalog fetch (`HTTP 403/429/5xx`) uses retry and cached catalog fallback automatically.
 
 ## Notes
 
 - This workflow updates user skills in `~/.codex/skills` (except `.system`).
 - Restart Codex after updates to ensure new skill contents are picked up.
 - `apply_skill_updates.py` can read check input (`ndjson` or `tsv`) from stdin with `--check-file -` and `--check-format`.
+- While developing this skill, run scoped updates: `--skill codex-skill-updater`.

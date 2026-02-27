@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import argparse
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,10 @@ DEFAULT_REF = "main"
 DEFAULT_JOBS = 4
 MAX_JOBS = 8
 DEFAULT_FORMAT = "ndjson"
+DEFAULT_LIST_RETRIES = 3
+LIST_RETRY_BACKOFF_SECONDS = 1.0
+CACHE_ROOT = SKILLS_ROOT / ".cache"
+CATALOG_CACHE_FILE = CACHE_ROOT / "skill-updater-remote-catalogs.json"
 
 
 @dataclass
@@ -38,6 +43,12 @@ class SkillEntry:
     note: str
 
 
+@dataclass
+class RemoteCatalog:
+    names: set[str]
+    index_available: bool
+
+
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
@@ -47,7 +58,57 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _load_remote_set(repo: str, path: str) -> set[str]:
+def _catalog_cache_key(repo: str, path: str, ref: str) -> str:
+    return f"{repo}:{path}:{ref}"
+
+
+def _load_catalog_cache() -> dict[str, dict]:
+    if not CATALOG_CACHE_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(CATALOG_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        out[key] = value
+    return out
+
+
+def _save_catalog_cache(cache: dict[str, dict]) -> None:
+    try:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        CATALOG_CACHE_FILE.write_text(
+            json.dumps(cache, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Cache write errors must not break update flow.
+        pass
+
+
+def _is_retryable_list_error(stderr: str) -> bool:
+    msg = stderr.lower()
+    return any(
+        token in msg
+        for token in (
+            "http 403",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "timed out",
+            "temporary failure",
+        )
+    )
+
+
+def _load_remote_catalog(repo: str, path: str, cache: dict[str, dict], retries: int) -> RemoteCatalog:
     cmd = [
         "python3",
         str(LIST_SCRIPT),
@@ -60,12 +121,50 @@ def _load_remote_set(repo: str, path: str) -> set[str]:
         "--format",
         "json",
     ]
-    proc = _run(cmd)
-    if proc.returncode != 0:
-        print(proc.stderr.strip(), file=sys.stderr)
-        raise SystemExit(f"failed to load remote skills: {repo}:{path}")
-    data = json.loads(proc.stdout)
-    return {row["name"] for row in data}
+    attempts = max(1, retries)
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        proc = _run(cmd)
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            names = {row["name"] for row in data}
+            key = _catalog_cache_key(repo, path, DEFAULT_REF)
+            cache[key] = {
+                "names": sorted(names),
+                "updated_at": int(time.time()),
+                "repo": repo,
+                "path": path,
+                "ref": DEFAULT_REF,
+            }
+            return RemoteCatalog(names=names, index_available=True)
+
+        stderr = (proc.stderr or proc.stdout or "").strip()
+        last_err = stderr
+        if attempt < attempts and _is_retryable_list_error(stderr):
+            sleep_seconds = LIST_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            print(
+                f"warning: catalog fetch failed for {repo}:{path} (attempt {attempt}/{attempts}): {stderr}",
+                file=sys.stderr,
+            )
+            time.sleep(sleep_seconds)
+            continue
+        break
+
+    key = _catalog_cache_key(repo, path, DEFAULT_REF)
+    cached = cache.get(key, {})
+    cached_names_raw = cached.get("names", [])
+    if isinstance(cached_names_raw, list) and all(isinstance(x, str) for x in cached_names_raw):
+        print(
+            f"warning: using cached catalog for {repo}:{path} because fetch failed: {last_err}",
+            file=sys.stderr,
+        )
+        return RemoteCatalog(names=set(cached_names_raw), index_available=True)
+
+    print(
+        f"warning: catalog unavailable for {repo}:{path}; fallback candidate probing enabled. last_error={last_err}",
+        file=sys.stderr,
+    )
+    return RemoteCatalog(names=set(), index_available=False)
 
 
 def _load_meta(path: Path) -> dict:
@@ -125,9 +224,9 @@ def _resolve_candidates(
     name: str,
     source_bucket: str,
     meta: dict,
-    openai_curated: set[str],
-    openai_system: set[str],
-    anthropics_skills: set[str],
+    openai_curated: RemoteCatalog,
+    openai_system: RemoteCatalog,
+    anthropics_skills: RemoteCatalog,
 ) -> list[tuple[str, str, str]]:
     candidates: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -149,20 +248,32 @@ def _resolve_candidates(
     elif source == "registry":
         # Registry does not expose a direct repo/path in metadata.
         reg_name = str(meta.get("name", name))
-        if reg_name in openai_curated:
+        if reg_name in openai_curated.names:
             add("openai/skills", f"skills/.curated/{reg_name}", "registry matched openai curated")
-        if reg_name in openai_system:
+        if reg_name in openai_system.names:
             add("openai/skills", f"skills/.system/{reg_name}", "registry matched openai system")
-        if reg_name in anthropics_skills:
+        if reg_name in anthropics_skills.names:
             add("anthropics/skills", f"skills/{reg_name}", "registry matched anthropics public")
+        if not openai_curated.index_available:
+            add("openai/skills", f"skills/.curated/{reg_name}", "registry fallback heuristic openai curated")
+        if not openai_system.index_available:
+            add("openai/skills", f"skills/.system/{reg_name}", "registry fallback heuristic openai system")
+        if not anthropics_skills.index_available:
+            add("anthropics/skills", f"skills/{reg_name}", "registry fallback heuristic anthropics public")
     else:
         # No useful metadata: resolve from known public lists.
-        if name in openai_curated:
+        if name in openai_curated.names:
             add("openai/skills", f"skills/.curated/{name}", "name matched openai curated")
-        if name in openai_system or source_bucket == "system":
+        if name in openai_system.names or source_bucket == "system":
             add("openai/skills", f"skills/.system/{name}", "name matched openai system")
-        if name in anthropics_skills:
+        if name in anthropics_skills.names:
             add("anthropics/skills", f"skills/{name}", "name matched anthropics public")
+        if not openai_curated.index_available:
+            add("openai/skills", f"skills/.curated/{name}", "name fallback heuristic openai curated")
+        if not openai_system.index_available and source_bucket == "system":
+            add("openai/skills", f"skills/.system/{name}", "name fallback heuristic openai system")
+        if not anthropics_skills.index_available:
+            add("anthropics/skills", f"skills/{name}", "name fallback heuristic anthropics public")
 
     return candidates
 
@@ -199,6 +310,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_JOBS,
         help=f"Parallel probe workers ({1}-{MAX_JOBS}, default: {DEFAULT_JOBS})",
     )
+    parser.add_argument(
+        "--list-retries",
+        type=int,
+        default=DEFAULT_LIST_RETRIES,
+        help=f"Remote catalog retries (default: {DEFAULT_LIST_RETRIES})",
+    )
     return parser.parse_args(argv)
 
 
@@ -208,9 +325,9 @@ def _normalize_jobs(raw_jobs: int) -> int:
 
 def _evaluate_skill(
     item: tuple[str, Path, str, dict],
-    openai_curated: set[str],
-    openai_system: set[str],
-    anthropics_skills: set[str],
+    openai_curated: RemoteCatalog,
+    openai_system: RemoteCatalog,
+    anthropics_skills: RemoteCatalog,
 ) -> SkillEntry:
     name, local_path, source_bucket, meta = item
     candidates = _resolve_candidates(
@@ -272,9 +389,11 @@ def main(argv: list[str]) -> int:
         print("skill-installer scripts were not found in ~/.codex/skills/.system", file=sys.stderr)
         return 2
 
-    openai_curated = _load_remote_set("openai/skills", "skills/.curated")
-    openai_system = _load_remote_set("openai/skills", "skills/.system")
-    anthropics_skills = _load_remote_set("anthropics/skills", "skills")
+    cache = _load_catalog_cache()
+    openai_curated = _load_remote_catalog("openai/skills", "skills/.curated", cache, args.list_retries)
+    openai_system = _load_remote_catalog("openai/skills", "skills/.system", cache, args.list_retries)
+    anthropics_skills = _load_remote_catalog("anthropics/skills", "skills", cache, args.list_retries)
+    _save_catalog_cache(cache)
 
     local_skills = _collect_local_skills()
     if jobs == 1:

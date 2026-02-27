@@ -30,6 +30,25 @@ DEFAULT_JOBS = 4
 MAX_JOBS = 8
 DEFAULT_CHECK_FORMAT = "auto"
 DEFAULT_BACKUP_KEEP_GENERATIONS = 2
+IGNORED_UPDATE_DIRS = {".git"}
+PLACEHOLDER_REPO_TOKENS = {
+    "owner",
+    "repo",
+    "org",
+    "organization",
+    "username",
+    "your-org",
+    "your-repo",
+    "your-user",
+}
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+AUTH_OR_REPO_ERROR_MARKERS = (
+    "repository not found",
+    "could not read from remote repository",
+    "permission denied (publickey)",
+    "authentication failed",
+    "could not resolve host",
+)
 
 
 def _default_source_map_paths() -> tuple[Path, Path]:
@@ -170,13 +189,39 @@ def _load_merged_source_map(public_path: Path, local_path: Path) -> dict[str, di
     return merged
 
 
-def _copy_tree(src: Path, dst: Path) -> None:
+def _validate_source_map_entry(_skill: str, cfg: dict[str, str]) -> str | None:
+    repo = str(cfg.get("repo", "")).strip()
+    skill_path = str(cfg.get("path", "")).strip()
+    if not repo or not skill_path:
+        return "repo/path must be non-empty"
+    if not REPO_PATTERN.match(repo):
+        return "repo must match owner/repo"
+    owner, repo_name = repo.split("/", 1)
+    if owner.lower() in PLACEHOLDER_REPO_TOKENS or repo_name.lower() in PLACEHOLDER_REPO_TOKENS:
+        return "repo looks like a placeholder"
+    if repo.lower().startswith("owner/"):
+        return "repo looks like a placeholder"
+    if skill_path in {"-", "/"}:
+        return "path must not be '-' or '/'"
+    return None
+
+
+def _is_auth_or_repo_error(message: str) -> bool:
+    text = message.lower()
+    return any(marker in text for marker in AUTH_OR_REPO_ERROR_MARKERS)
+
+
+def _ignore_update_dirs(_src: str, names: list[str]) -> set[str]:
+    return {name for name in names if name in IGNORED_UPDATE_DIRS}
+
+
+def _copy_tree(src: Path, dst: Path, *, ignore=None) -> None:
     if dst.exists() or dst.is_symlink():
         if dst.is_symlink() or dst.is_file():
             dst.unlink()
         else:
             shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    shutil.copytree(src, dst, ignore=ignore)
 
 
 def _fingerprint_tree(root: Path) -> str:
@@ -184,7 +229,10 @@ def _fingerprint_tree(root: Path) -> str:
         raise RuntimeError(f"not a directory: {root}")
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
-        rel = path.relative_to(root).as_posix().encode("utf-8")
+        rel_path = path.relative_to(root)
+        if any(part in IGNORED_UPDATE_DIRS for part in rel_path.parts):
+            continue
+        rel = rel_path.as_posix().encode("utf-8")
         if path.is_symlink():
             digest.update(b"L")
             digest.update(rel)
@@ -327,12 +375,7 @@ def _create_backup(skill: str, bucket: str, backup_root: Path, no_backup: bool) 
 
 def _apply_staged(skill: str, bucket: str, staged: Path) -> None:
     dest = _target_root(bucket) / skill
-    if dest.exists() or dest.is_symlink():
-        if dest.is_symlink() or dest.is_file():
-            dest.unlink()
-        else:
-            shutil.rmtree(dest)
-    shutil.copytree(staged, dest)
+    _copy_tree(staged, dest, ignore=_ignore_update_dirs)
     if not (dest / "SKILL.md").is_file():
         raise RuntimeError("post-update validation failed (missing SKILL.md)")
 
@@ -387,6 +430,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-manual-map", action="store_true")
     parser.add_argument("--source-map", default="")
     parser.add_argument("--source-map-local", default="")
+    parser.add_argument("--strict-config", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--report", default="")
     parser.add_argument("--debug-artifacts", action="store_true")
@@ -462,17 +506,48 @@ def _stage_one(
                     result=UpdateResult(
                         skill=row.skill,
                         strategy=row.strategy,
-                        status="SKIPPED",
+                        status="CONFIG_ERROR",
                         reason="skill_not_found_in_source_map",
                     ),
                 )
-            temp_root, staged = _stage_from_installer(
-                skill=row.skill,
-                repo=cfg["repo"],
-                skill_path=cfg["path"],
-                ref=cfg.get("ref", "main"),
-                commands=commands,
-            )
+            validation_error = _validate_source_map_entry(row.skill, cfg)
+            if validation_error:
+                return StageTaskResult(
+                    index=index,
+                    row=row,
+                    commands=commands,
+                    result=UpdateResult(
+                        skill=row.skill,
+                        strategy=row.strategy,
+                        status="CONFIG_ERROR",
+                        reason=f"invalid_source_map_entry: {validation_error}",
+                    ),
+                )
+            try:
+                temp_root, staged = _stage_from_installer(
+                    skill=row.skill,
+                    repo=cfg["repo"],
+                    skill_path=cfg["path"],
+                    ref=cfg.get("ref", "main"),
+                    commands=commands,
+                )
+            except Exception as exc:
+                err = str(exc)
+                if _is_auth_or_repo_error(err):
+                    return StageTaskResult(
+                        index=index,
+                        row=row,
+                        commands=commands,
+                        result=UpdateResult(
+                            skill=row.skill,
+                            strategy=row.strategy,
+                            status="CONFIG_ERROR",
+                            reason=f"source_map_unreachable_or_auth_failed: {err}",
+                            commands=commands,
+                            rollback="not_needed",
+                        ),
+                    )
+                raise
         else:
             return StageTaskResult(
                 index=index,
@@ -544,6 +619,14 @@ def _stage_one(
         )
 
 
+def _calculate_exit_code(summary: dict[str, int], strict_config: bool) -> int:
+    if summary["failed"] > 0:
+        return 1
+    if strict_config and summary.get("config_error", 0) > 0:
+        return 3
+    return 0
+
+
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
     if args.debug_artifacts and not args.report:
@@ -599,7 +682,7 @@ def main(argv: list[str]) -> int:
             ordered_results[idx] = UpdateResult(
                 skill=row.skill,
                 strategy=row.strategy,
-                status="SKIPPED",
+                status="PRECHECK_FAIL",
                 reason="precheck_result_is_fail",
             )
             continue
@@ -626,7 +709,7 @@ def main(argv: list[str]) -> int:
         for idx, row in stage_inputs:
             out = _stage_one(idx, row, args.allow_manual_map, source_map, args.dry_run)
             stage_outputs.append(out)
-            if args.fail_fast and out.result is not None and out.result.status in {"FAILED", "FAILED_ROLLBACK"}:
+            if args.fail_fast and out.result is not None and out.result.status in {"FAILED", "FAILED_ROLLBACK", "CONFIG_ERROR"}:
                 break
     else:
         with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -640,7 +723,7 @@ def main(argv: list[str]) -> int:
     for out in stage_outputs:
         if out.result is not None:
             ordered_results[out.index] = out.result
-            if args.fail_fast and out.result.status in {"FAILED", "FAILED_ROLLBACK"}:
+            if args.fail_fast and out.result.status in {"FAILED", "FAILED_ROLLBACK", "CONFIG_ERROR"}:
                 break
             continue
         staged_for_apply.append(out)
@@ -688,6 +771,8 @@ def main(argv: list[str]) -> int:
         "failed": sum(1 for r in results if r.status in {"FAILED", "FAILED_ROLLBACK"}),
         "skipped": sum(1 for r in results if r.status == "SKIPPED"),
         "dry_run": sum(1 for r in results if r.status == "DRY_RUN"),
+        "config_error": sum(1 for r in results if r.status == "CONFIG_ERROR"),
+        "precheck_fail": sum(1 for r in results if r.status == "PRECHECK_FAIL"),
     }
     if summary["failed"] == 0 and not args.dry_run and not args.no_backup:
         _prune_backup_generations(BACKUPS_ROOT, keep=DEFAULT_BACKUP_KEEP_GENERATIONS)
@@ -711,7 +796,7 @@ def main(argv: list[str]) -> int:
     print(json.dumps(summary, ensure_ascii=False))
     if report_path:
         print(f"report: {report_path}")
-    return 1 if summary["failed"] > 0 else 0
+    return _calculate_exit_code(summary, args.strict_config)
 
 
 if __name__ == "__main__":
