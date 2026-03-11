@@ -25,6 +25,8 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 
 4. ドライラン
 - `python3 scripts/update_skills.py --dry-run --allow-manual-map --source-map ./config/skills_source_map.json --source-map-local ./config/skills_source_map.local.json --jobs 4`
+- precheck に `FAIL` が混じっても、更新可能な skill は続行されます。
+- ただし最終終了コードは不完全更新を示すため `1` のままです。
 
 5. 問題なければ本適用
 - `python3 scripts/update_skills.py --allow-manual-map --source-map ./config/skills_source_map.json --source-map-local ./config/skills_source_map.local.json --jobs 4`
@@ -47,10 +49,13 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - バックアップは実行単位で最新3世代を保持し、更新処理が失敗なしで完了した場合のみ古い世代を削除
 - 同一版で更新不要なら更新しない（スキップ）
 - 更新が必要かの確認時は並列実行。最終更新は直列実行。
+- `check` で一部 skill が `FAIL` でも、`update_skills.py` は更新可能な skill の適用を続行する
+- その場合の最終終了コードは `1`（部分失敗あり）
 - `--backup-root` での保存先指定はサポートしない（固定先のみ）
 - `source_map` の設定不備は `CONFIG_ERROR` として分類（実装不具合と分離）
 - `--strict-config` 指定時は `CONFIG_ERROR` が1件でもあると終了コード `3`
 - GitHub catalog 取得（`list-skills`）は自動リトライし、失敗時はローカルキャッシュへフォールバック
+- GitHub 由来の skill は `ref` を保持して更新する。`ref` が不明な場合のみ `main` を使う
 
 ## source_map 運用
 
@@ -59,6 +64,7 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - 同じ skill キーが両方にある場合、`skills_source_map.local.json` が優先されます。
 - `skills_source_map.local.json` の内容が `skills_source_map.json` を上書きするため、ダミー値を入れると更新失敗要因になります。
 - `owner/repo` などプレースホルダ値は `CONFIG_ERROR` 扱い
+- `ref` を省略した場合は `main` 扱い
 
 ## バックアップ整理
 
@@ -71,11 +77,18 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - `Repository not found` / `Could not read from remote repository`:
   - `repo` が実在の `owner/repo` か確認
   - private repo の場合は `ssh -T git@github.com` で認証確認
+- `Permission denied (publickey)`:
+  - SSH 鍵が読み込まれているか確認
+  - private repo の場合は `ssh -T git@github.com` が通る状態にする
+  - manual source map 利用時は `CONFIG_ERROR` として集計される
 - `Failed to fetch skills: HTTP 403`:
   - `check` は自動リトライ後にキャッシュへフォールバック
   - 必要なら `--list-retries` を増やして実行
 - `CONFIG_ERROR` が出るが他更新は進めたい:
   - デフォルト挙動のまま実行（対象skillのみスキップ）
+- `precheck FAIL` が出るが更新可能なものは進めたい:
+  - デフォルト挙動のままでよい
+  - 終了コードは `1` なので、CI では部分失敗として検知できる
 - `CONFIG_ERROR` をCIで失敗扱いしたい:
   - `python3 codex-skill-updater/scripts/update_skills.py ... --strict-config`
 

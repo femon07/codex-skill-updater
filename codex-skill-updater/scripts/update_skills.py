@@ -58,14 +58,15 @@ def main(argv: list[str]) -> int:
         capture_output=True,
         check=False,
     )
-    if check_proc.returncode != 0:
+    if check_proc.stderr:
+        print(check_proc.stderr, end="", file=sys.stderr)
+    if check_proc.returncode > 1:
         if check_proc.stdout:
             print(check_proc.stdout, end="", file=sys.stdout)
-        if check_proc.stderr:
-            print(check_proc.stderr, end="", file=sys.stderr)
         return check_proc.returncode
 
     check_output = check_proc.stdout
+    soft_fail_detected = check_proc.returncode == 1
     if args.debug_artifacts:
         Path(DEBUG_CHECK_FILE).write_text(check_output, encoding="utf-8")
 
@@ -103,7 +104,11 @@ def main(argv: list[str]) -> int:
         print(apply_proc.stdout, end="", file=sys.stdout)
     if apply_proc.stderr:
         print(apply_proc.stderr, end="", file=sys.stderr)
-    return apply_proc.returncode
+    if apply_proc.returncode != 0:
+        return apply_proc.returncode
+    if soft_fail_detected:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

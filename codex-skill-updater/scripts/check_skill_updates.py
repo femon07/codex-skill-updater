@@ -38,6 +38,7 @@ class SkillEntry:
     source_bucket: str
     remote_repo: str | None
     remote_path: str | None
+    remote_ref: str | None
     check: str
     strategy: str
     note: str
@@ -196,7 +197,12 @@ def _collect_local_skills() -> list[tuple[str, Path, str, dict]]:
     return skills
 
 
-def _probe_install(repo: str, remote_path: str) -> tuple[bool, str]:
+def _normalize_ref(raw_ref: object) -> str:
+    ref = str(raw_ref or "").strip()
+    return ref or DEFAULT_REF
+
+
+def _probe_install(repo: str, remote_path: str, ref: str) -> tuple[bool, str]:
     temp_root = Path(tempfile.mkdtemp(prefix="skill-update-probe-"))
     try:
         cmd = [
@@ -205,7 +211,7 @@ def _probe_install(repo: str, remote_path: str) -> tuple[bool, str]:
             "--repo",
             repo,
             "--ref",
-            DEFAULT_REF,
+            ref,
             "--path",
             remote_path,
             "--dest",
@@ -222,58 +228,49 @@ def _probe_install(repo: str, remote_path: str) -> tuple[bool, str]:
 
 def _resolve_candidates(
     name: str,
-    source_bucket: str,
     meta: dict,
     openai_curated: RemoteCatalog,
-    openai_system: RemoteCatalog,
     anthropics_skills: RemoteCatalog,
-) -> list[tuple[str, str, str]]:
-    candidates: list[tuple[str, str, str]] = []
-    seen: set[tuple[str, str]] = set()
+) -> list[tuple[str, str, str, str]]:
+    candidates: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
 
-    def add(repo: str, path: str, reason: str) -> None:
-        key = (repo, path)
+    def add(repo: str, path: str, ref: str, reason: str) -> None:
+        key = (repo, path, ref)
         if key in seen:
             return
         seen.add(key)
-        candidates.append((repo, path, reason))
+        candidates.append((repo, path, ref, reason))
 
     source = meta.get("source")
     if source == "github" and meta.get("repo") and meta.get("skillPath"):
         repo = str(meta["repo"])
         skill_path = str(meta["skillPath"]).strip("/")
-        add(repo, skill_path, "meta github skillPath")
+        ref = _normalize_ref(meta.get("ref"))
+        add(repo, skill_path, ref, "meta github skillPath")
         if not skill_path.startswith("skills/"):
-            add(repo, f"skills/{skill_path}", "meta github + skills/ prefix")
+            add(repo, f"skills/{skill_path}", ref, "meta github + skills/ prefix")
     elif source == "registry":
         # Registry does not expose a direct repo/path in metadata.
         reg_name = str(meta.get("name", name))
         if reg_name in openai_curated.names:
-            add("openai/skills", f"skills/.curated/{reg_name}", "registry matched openai curated")
-        if reg_name in openai_system.names:
-            add("openai/skills", f"skills/.system/{reg_name}", "registry matched openai system")
+            add("openai/skills", f"skills/.curated/{reg_name}", DEFAULT_REF, "registry matched openai curated")
         if reg_name in anthropics_skills.names:
-            add("anthropics/skills", f"skills/{reg_name}", "registry matched anthropics public")
+            add("anthropics/skills", f"skills/{reg_name}", DEFAULT_REF, "registry matched anthropics public")
         if not openai_curated.index_available:
-            add("openai/skills", f"skills/.curated/{reg_name}", "registry fallback heuristic openai curated")
-        if not openai_system.index_available:
-            add("openai/skills", f"skills/.system/{reg_name}", "registry fallback heuristic openai system")
+            add("openai/skills", f"skills/.curated/{reg_name}", DEFAULT_REF, "registry fallback heuristic openai curated")
         if not anthropics_skills.index_available:
-            add("anthropics/skills", f"skills/{reg_name}", "registry fallback heuristic anthropics public")
+            add("anthropics/skills", f"skills/{reg_name}", DEFAULT_REF, "registry fallback heuristic anthropics public")
     else:
         # No useful metadata: resolve from known public lists.
         if name in openai_curated.names:
-            add("openai/skills", f"skills/.curated/{name}", "name matched openai curated")
-        if name in openai_system.names or source_bucket == "system":
-            add("openai/skills", f"skills/.system/{name}", "name matched openai system")
+            add("openai/skills", f"skills/.curated/{name}", DEFAULT_REF, "name matched openai curated")
         if name in anthropics_skills.names:
-            add("anthropics/skills", f"skills/{name}", "name matched anthropics public")
+            add("anthropics/skills", f"skills/{name}", DEFAULT_REF, "name matched anthropics public")
         if not openai_curated.index_available:
-            add("openai/skills", f"skills/.curated/{name}", "name fallback heuristic openai curated")
-        if not openai_system.index_available and source_bucket == "system":
-            add("openai/skills", f"skills/.system/{name}", "name fallback heuristic openai system")
+            add("openai/skills", f"skills/.curated/{name}", DEFAULT_REF, "name fallback heuristic openai curated")
         if not anthropics_skills.index_available:
-            add("anthropics/skills", f"skills/{name}", "name fallback heuristic anthropics public")
+            add("anthropics/skills", f"skills/{name}", DEFAULT_REF, "name fallback heuristic anthropics public")
 
     return candidates
 
@@ -326,16 +323,13 @@ def _normalize_jobs(raw_jobs: int) -> int:
 def _evaluate_skill(
     item: tuple[str, Path, str, dict],
     openai_curated: RemoteCatalog,
-    openai_system: RemoteCatalog,
     anthropics_skills: RemoteCatalog,
 ) -> SkillEntry:
     name, local_path, source_bucket, meta = item
     candidates = _resolve_candidates(
         name=name,
-        source_bucket=source_bucket,
         meta=meta,
         openai_curated=openai_curated,
-        openai_system=openai_system,
         anthropics_skills=anthropics_skills,
     )
     if not candidates:
@@ -349,6 +343,7 @@ def _evaluate_skill(
             source_bucket=source_bucket,
             remote_repo=None,
             remote_path=None,
+            remote_ref=None,
             check="SKIP",
             strategy=strategy,
             note=strategy_note,
@@ -357,17 +352,20 @@ def _evaluate_skill(
     ok = False
     repo = None
     remote_path = None
+    remote_ref = None
     note = "install probe failed"
-    for candidate_repo, candidate_path, reason in candidates:
-        cand_ok, cand_note = _probe_install(candidate_repo, candidate_path)
+    for candidate_repo, candidate_path, candidate_ref, reason in candidates:
+        cand_ok, cand_note = _probe_install(candidate_repo, candidate_path, candidate_ref)
         if cand_ok:
             ok = True
             repo = candidate_repo
             remote_path = candidate_path
+            remote_ref = candidate_ref
             note = f"ok ({reason})"
             break
         repo = candidate_repo
         remote_path = candidate_path
+        remote_ref = candidate_ref
         note = f"{cand_note} ({reason})"
     return SkillEntry(
         name=name,
@@ -375,6 +373,7 @@ def _evaluate_skill(
         source_bucket=source_bucket,
         remote_repo=repo,
         remote_path=remote_path,
+        remote_ref=remote_ref,
         check="OK" if ok else "FAIL",
         strategy="update-via-github",
         note=note,
@@ -391,21 +390,20 @@ def main(argv: list[str]) -> int:
 
     cache = _load_catalog_cache()
     openai_curated = _load_remote_catalog("openai/skills", "skills/.curated", cache, args.list_retries)
-    openai_system = _load_remote_catalog("openai/skills", "skills/.system", cache, args.list_retries)
     anthropics_skills = _load_remote_catalog("anthropics/skills", "skills", cache, args.list_retries)
     _save_catalog_cache(cache)
 
     local_skills = _collect_local_skills()
     if jobs == 1:
         rows = [
-            _evaluate_skill(item, openai_curated, openai_system, anthropics_skills)
+            _evaluate_skill(item, openai_curated, anthropics_skills)
             for item in local_skills
         ]
     else:
         with ThreadPoolExecutor(max_workers=jobs) as executor:
             rows = list(
                 executor.map(
-                    lambda item: _evaluate_skill(item, openai_curated, openai_system, anthropics_skills),
+                    lambda item: _evaluate_skill(item, openai_curated, anthropics_skills),
                     local_skills,
                 )
             )
@@ -416,13 +414,14 @@ def main(argv: list[str]) -> int:
     fail = sum(1 for r in rows if r.check == "FAIL")
     skip = sum(1 for r in rows if r.check == "SKIP")
     if args.format == "tsv":
-        print("skill\tbucket\tresult\tstrategy\trepo\tremote_path\tnote")
+        print("skill\tbucket\tresult\tstrategy\trepo\tremote_path\tref\tnote")
         for row in rows:
             print(
                 f"{row.name}\t{row.source_bucket}\t{row.check}\t"
                 f"{row.strategy}\t"
                 f"{row.remote_repo or '-'}\t"
-                f"{row.remote_path or '-'}\t{row.note}"
+                f"{row.remote_path or '-'}\t"
+                f"{row.remote_ref or '-'}\t{row.note}"
             )
         print("")
         print(f"summary: total={total} ok={ok} fail={fail} skip={skip}")
@@ -438,6 +437,7 @@ def main(argv: list[str]) -> int:
                         "strategy": row.strategy,
                         "repo": row.remote_repo,
                         "remote_path": row.remote_path,
+                        "ref": row.remote_ref,
                         "note": row.note,
                     },
                     ensure_ascii=False,

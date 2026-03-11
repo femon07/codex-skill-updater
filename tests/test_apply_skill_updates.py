@@ -78,12 +78,49 @@ class ApplySkillUpdatesTests(unittest.TestCase):
             strategy="manual-source-map-required",
             repo="",
             remote_path="",
+            ref="",
             note="",
         )
         staged = self.mod._stage_one(0, row, True, {}, True)
         self.assertIsNotNone(staged.result)
         self.assertEqual(staged.result.status, "CONFIG_ERROR")
         self.assertEqual(staged.result.reason, "skill_not_found_in_source_map")
+
+    def test_stage_one_update_via_github_uses_row_ref(self):
+        row = self.mod.UpdateRow(
+            skill="sample-skill",
+            bucket="user",
+            result="OK",
+            strategy="update-via-github",
+            repo="org/repo",
+            remote_path="skills/sample-skill",
+            ref="feature/test",
+            note="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            staged = tmp_path / "staged"
+            staged.mkdir()
+            (staged / "SKILL.md").write_text("name: sample\n", encoding="utf-8")
+            with patch.object(
+                self.mod,
+                "_stage_from_installer",
+                return_value=(tmp_path, staged),
+            ) as stage_from_installer, patch.object(
+                self.mod,
+                "_target_root",
+                return_value=tmp_path / "root",
+            ):
+                result = self.mod._stage_one(0, row, False, {}, True)
+        self.assertIsNotNone(result.result)
+        self.assertEqual(result.result.status, "DRY_RUN")
+        stage_from_installer.assert_called_once_with(
+            skill="sample-skill",
+            repo="org/repo",
+            skill_path="skills/sample-skill",
+            ref="feature/test",
+            commands=[],
+        )
 
     def test_fingerprint_tree_ignores_git(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +179,7 @@ class ApplySkillUpdatesTests(unittest.TestCase):
                                 "strategy": "update-via-github",
                                 "repo": "org/x",
                                 "remote_path": "skills/x",
+                                "ref": "main",
                                 "note": "probe failed",
                             }
                         ),
@@ -172,6 +210,7 @@ class ApplySkillUpdatesTests(unittest.TestCase):
                         "strategy": "manual-source-map-required",
                         "repo": None,
                         "remote_path": None,
+                        "ref": None,
                         "note": "manual map required",
                     }
                 )

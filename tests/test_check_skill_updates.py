@@ -33,15 +33,26 @@ class CheckSkillUpdatesTests(unittest.TestCase):
         c = self.mod.RemoteCatalog(names=set(), index_available=False)
         candidates = self.mod._resolve_candidates(
             name="docx",
-            source_bucket="user",
             meta={},
             openai_curated=c,
-            openai_system=c,
             anthropics_skills=c,
         )
-        repos = {(repo, path) for repo, path, _ in candidates}
+        repos = {(repo, path) for repo, path, _, _ in candidates}
         self.assertIn(("openai/skills", "skills/.curated/docx"), repos)
         self.assertIn(("anthropics/skills", "skills/docx"), repos)
+
+    def test_resolve_candidates_uses_meta_ref_for_github_source(self):
+        c = self.mod.RemoteCatalog(names=set(), index_available=True)
+        candidates = self.mod._resolve_candidates(
+            name="docx",
+            meta={"source": "github", "repo": "org/repo", "skillPath": "skills/docx", "ref": "feature/test"},
+            openai_curated=c,
+            anthropics_skills=c,
+        )
+        self.assertEqual(
+            candidates,
+            [("org/repo", "skills/docx", "feature/test", "meta github skillPath")],
+        )
 
     def test_load_remote_catalog_uses_cache_on_fetch_failure(self):
         cache_key = self.mod._catalog_cache_key("openai/skills", "skills/.curated", "main")

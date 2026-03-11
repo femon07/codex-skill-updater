@@ -65,6 +65,7 @@ class UpdateRow:
     strategy: str
     repo: str
     remote_path: str
+    ref: str
     note: str
 
 
@@ -107,6 +108,7 @@ def _to_update_row(raw: dict[str, Any]) -> UpdateRow:
         strategy=_normalize_row_value(raw.get("strategy", "")),
         repo=_normalize_row_value(raw.get("repo", "")),
         remote_path=_normalize_row_value(raw.get("remote_path", "")),
+        ref=_normalize_row_value(raw.get("ref", "")),
         note=_normalize_row_value(raw.get("note", "")),
     )
 
@@ -467,7 +469,7 @@ def _stage_one(
                 skill=row.skill,
                 repo=row.repo,
                 skill_path=row.remote_path,
-                ref="main",
+                ref=row.ref or "main",
                 commands=commands,
             )
         elif row.strategy == "sync-from-claude-mirror":
@@ -684,14 +686,6 @@ def main(argv: list[str]) -> int:
                 strategy=row.strategy,
                 status="PRECHECK_FAIL",
                 reason="precheck_result_is_fail",
-            )
-            continue
-        if row.bucket == "system":
-            ordered_results[idx] = UpdateResult(
-                skill=row.skill,
-                strategy=row.strategy,
-                status="SKIPPED",
-                reason="system_updates_disabled_per_policy",
             )
             continue
         if os.name == "nt" and self_skill_name and row.skill == self_skill_name:
