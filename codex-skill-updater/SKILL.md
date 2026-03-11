@@ -43,6 +43,8 @@ Use this skill when you want to keep installed user skills up to date in `~/.cod
 
 `~/.codex/skills/.system` はこのワークフローの更新対象外です。
 
+When metadata and public catalogs are not enough, the precheck also inspects a local `.git` remote and current branch to infer `repo/path/ref` before falling back to manual source maps.
+
 ## Handling Newly Added Skills
 
 When new skills are added later and show up as `manual-source-map-required`:
@@ -89,6 +91,7 @@ Use this format:
 - Catalog fetch (`HTTP 403/429/5xx`) uses retry and cached catalog fallback automatically.
 - `update_skills.py` continues past precheck `FAIL` rows for other skills, but still exits `1` if any precheck failure occurred.
 - Auto-resolved GitHub updates retain a discovered `ref`; when no ref is known, `main` is used.
+- If an installed skill is itself a Git checkout, precheck uses its `origin` and current branch as an additional source-resolution fallback.
 
 ## Notes
 

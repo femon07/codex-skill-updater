@@ -11,6 +11,7 @@ import sys
 import tempfile
 import argparse
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,11 @@ DEFAULT_LIST_RETRIES = 3
 LIST_RETRY_BACKOFF_SECONDS = 1.0
 CACHE_ROOT = SKILLS_ROOT / ".cache"
 CATALOG_CACHE_FILE = CACHE_ROOT / "skill-updater-remote-catalogs.json"
+GITHUB_REMOTE_PATTERNS = (
+    re.compile(r"^git@github\.com:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$"),
+    re.compile(r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"),
+    re.compile(r"^ssh://git@github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"),
+)
 
 
 @dataclass
@@ -202,7 +208,39 @@ def _normalize_ref(raw_ref: object) -> str:
     return ref or DEFAULT_REF
 
 
-def _probe_install(repo: str, remote_path: str, ref: str) -> tuple[bool, str]:
+def _normalize_github_repo(raw_url: str) -> str | None:
+    url = raw_url.strip()
+    for pattern in GITHUB_REMOTE_PATTERNS:
+        match = pattern.match(url)
+        if match:
+            return match.group("repo")
+    return None
+
+
+def _infer_git_source(skill_path: Path) -> tuple[str, str, str] | None:
+    git_dir = skill_path / ".git"
+    if not git_dir.exists():
+        return None
+
+    root_proc = _run(["git", "-C", str(skill_path), "rev-parse", "--show-toplevel"])
+    if root_proc.returncode != 0:
+        return None
+    root = Path(root_proc.stdout.strip()).resolve()
+
+    remote_proc = _run(["git", "-C", str(skill_path), "remote", "get-url", "origin"])
+    if remote_proc.returncode != 0:
+        return None
+    repo = _normalize_github_repo(remote_proc.stdout.strip())
+    if not repo:
+        return None
+
+    branch_proc = _run(["git", "-C", str(skill_path), "rev-parse", "--abbrev-ref", "HEAD"])
+    ref = _normalize_ref(branch_proc.stdout.strip() if branch_proc.returncode == 0 else DEFAULT_REF)
+    rel_path = skill_path.resolve().relative_to(root).as_posix() if skill_path.resolve() != root else "."
+    return repo, rel_path, ref
+
+
+def _probe_install(name: str, repo: str, remote_path: str, ref: str) -> tuple[bool, str]:
     temp_root = Path(tempfile.mkdtemp(prefix="skill-update-probe-"))
     try:
         cmd = [
@@ -214,6 +252,8 @@ def _probe_install(repo: str, remote_path: str, ref: str) -> tuple[bool, str]:
             ref,
             "--path",
             remote_path,
+            "--name",
+            name,
             "--dest",
             str(temp_root),
         ]
@@ -228,6 +268,7 @@ def _probe_install(repo: str, remote_path: str, ref: str) -> tuple[bool, str]:
 
 def _resolve_candidates(
     name: str,
+    local_path: Path,
     meta: dict,
     openai_curated: RemoteCatalog,
     anthropics_skills: RemoteCatalog,
@@ -271,6 +312,11 @@ def _resolve_candidates(
             add("openai/skills", f"skills/.curated/{name}", DEFAULT_REF, "name fallback heuristic openai curated")
         if not anthropics_skills.index_available:
             add("anthropics/skills", f"skills/{name}", DEFAULT_REF, "name fallback heuristic anthropics public")
+
+    git_source = _infer_git_source(local_path)
+    if git_source:
+        repo, skill_path, ref = git_source
+        add(repo, skill_path, ref, "git remote origin")
 
     return candidates
 
@@ -328,6 +374,7 @@ def _evaluate_skill(
     name, local_path, source_bucket, meta = item
     candidates = _resolve_candidates(
         name=name,
+        local_path=local_path,
         meta=meta,
         openai_curated=openai_curated,
         anthropics_skills=anthropics_skills,
@@ -355,7 +402,7 @@ def _evaluate_skill(
     remote_ref = None
     note = "install probe failed"
     for candidate_repo, candidate_path, candidate_ref, reason in candidates:
-        cand_ok, cand_note = _probe_install(candidate_repo, candidate_path, candidate_ref)
+        cand_ok, cand_note = _probe_install(name, candidate_repo, candidate_path, candidate_ref)
         if cand_ok:
             ok = True
             repo = candidate_repo

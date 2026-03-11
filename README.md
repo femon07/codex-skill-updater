@@ -56,6 +56,7 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
 - `--strict-config` 指定時は `CONFIG_ERROR` が1件でもあると終了コード `3`
 - GitHub catalog 取得（`list-skills`）は自動リトライし、失敗時はローカルキャッシュへフォールバック
 - GitHub 由来の skill は `ref` を保持して更新する。`ref` が不明な場合のみ `main` を使う
+- `.skill-meta.json` や public catalog で解決できない場合でも、インストール済み skill に `.git` があれば `origin` と現在 branch から更新元を推定する
 
 ## source_map 運用
 
@@ -86,6 +87,9 @@ private repo を更新する場合は、実行環境で GitHub SSH 認証を事�
   - 必要なら `--list-retries` を増やして実行
 - `CONFIG_ERROR` が出るが他更新は進めたい:
   - デフォルト挙動のまま実行（対象skillのみスキップ）
+- `manual-source-map-required` になったが skill 自体は Git 管理されている:
+  - `.git` の `origin` が GitHub URL なら自動推定される
+  - それでも unresolved の場合だけ `source_map` 追加を検討する
 - `precheck FAIL` が出るが更新可能なものは進めたい:
   - デフォルト挙動のままでよい
   - 終了コードは `1` なので、CI では部分失敗として検知できる
